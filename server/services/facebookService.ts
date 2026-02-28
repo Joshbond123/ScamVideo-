@@ -34,12 +34,12 @@ export async function verifyTokenAndGetPages(token: string): Promise<FacebookPag
   try {
     const me = await axios.get('https://graph.facebook.com/v19.0/me', {
       params: {
-        fields: 'id,name',
+        fields: 'id,name,category',
         access_token: token,
       },
     });
 
-    if (me.data?.id && me.data?.name) {
+    if (me.data?.id && me.data?.name && me.data?.category) {
       return [
         toFacebookPage({
           id: me.data.id,
@@ -52,7 +52,7 @@ export async function verifyTokenAndGetPages(token: string): Promise<FacebookPag
     console.error('FB Token Verification Error:', error.response?.data || error.message);
   }
 
-  throw new Error('Invalid Facebook Access Token');
+  throw new Error('Invalid Facebook token or token lacks page access permissions.');
 }
 
 export async function postToFacebook(pageId: string, message: string, link?: string) {
@@ -81,24 +81,6 @@ export async function postPhotoToFacebook(pageId: string, imageUrl: string, capt
     url: imageUrl,
     caption,
     access_token: page.accessToken,
-  });
-  return response.data;
-}
-
-export async function postVideoToFacebook(pageId: string, videoUrl: string, description: string) {
-  const pages = await readJson<FacebookPage[]>(PATHS.facebook.pages);
-  const page = pages.find((p) => p.id === pageId);
-  const pages = await readJson<FacebookPage[]>(PATHS.facebook.pages);
-  const page = pages.find((p) => p.id === pageId);
-  const page = pages.find(p => p.id === pageId);
-  if (!page) throw new Error('Page not found');
-
-  const url = `https://graph.facebook.com/v19.0/${pageId}/photos`;
-  const response = await axios.post(url, {
-    url: imageUrl,
-    caption,
-    access_token: page.accessToken,
-    access_token: page.accessToken
   });
   return response.data;
 }

@@ -2,7 +2,6 @@ import { readJson, updateJson, PATHS } from './db';
 import { Schedule } from '../src/types';
 import { discoverTopics, getUniqueTopic } from './services/topicService';
 import { generateScript, generateVoiceover, generateImage, assembleVideo, uploadToCatbox, cleanupJobAssets, generatePostImageWithTitleOverlay, cleanupPostImageAsset } from './services/videoService';
-import { generateScript, generateVoiceover, generateImage, assembleVideo, uploadToCatbox, cleanupJobAssets, generatePostImageWithTitleOverlay } from './services/videoService';
 import { postPhotoToFacebook, postVideoToFacebook } from './services/facebookService';
 
 let nextJobTimeout: NodeJS.Timeout | null = null;
@@ -141,6 +140,10 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
 
 async function runPostPipeline(schedule: Schedule, topic: string) {
   const scriptData = await generateScript(schedule.niche, topic);
+  if (!Array.isArray(scriptData.scenes) || scriptData.scenes.length === 0) {
+    throw new Error('Generated post script has no scenes');
+  }
+
   const imgPath = await generatePostImageWithTitleOverlay(scriptData.scenes[0].imagePrompt, scriptData.title, schedule.id);
   
   // Upload post image and publish as a Facebook photo post so the overlayed title appears in-feed.
