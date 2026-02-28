@@ -5,6 +5,7 @@ import { generateScript, generateVoiceover, generateImage, assembleVideo, upload
 import { postPhotoToFacebook, postVideoToFacebook } from './services/facebookService';
 
 let nextJobTimeout: NodeJS.Timeout | null = null;
+const MAX_TIMEOUT_MS = 2_147_483_647; // Node.js setTimeout max (~24.8 days)
 
 export function requestSchedulerRefresh() {
   scheduleNext().catch((error) => {
@@ -38,10 +39,16 @@ async function scheduleNext() {
 
   console.log(`Next job scheduled in ${delay / 1000}s: ${nearest.id}`);
 
+  const timeout = Math.min(delay, MAX_TIMEOUT_MS);
   nextJobTimeout = setTimeout(async () => {
+    if (delay > MAX_TIMEOUT_MS) {
+      await scheduleNext();
+      return;
+    }
+
     await runJob(nearest);
     await scheduleNext();
-  }, delay);
+  }, timeout);
 }
 
 export async function runJob(schedule: Schedule) {

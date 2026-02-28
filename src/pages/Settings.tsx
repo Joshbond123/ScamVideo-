@@ -58,7 +58,15 @@ export default function Settings() {
   }
 
   function showError(error: unknown, fallback: string) {
-    const message = error instanceof Error ? error.message : fallback;
+    const messageFromResponse =
+      typeof error === 'object' &&
+      error !== null &&
+      'response' in error &&
+      typeof (error as any).response?.data?.error === 'string'
+        ? (error as any).response.data.error
+        : null;
+
+    const message = messageFromResponse || (error instanceof Error ? error.message : fallback);
     setNotice({ type: 'error', message });
   }
 
