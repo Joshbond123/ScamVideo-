@@ -1,12 +1,11 @@
 import axios from 'axios';
-import { 
-  DashboardStats, 
-  Schedule, 
-  PublishedItem, 
-  ApiKey, 
-  FacebookPage, 
-  LogEntry, 
-  Niche
+import {
+  DashboardStats,
+  Schedule,
+  PublishedItem,
+  ApiKey,
+  FacebookPage,
+  LogEntry,
 } from '../types';
 
 const client = axios.create({
@@ -22,7 +21,7 @@ export const api = {
       client.get('/content/published-videos'),
       client.get('/content/published-posts')
     ]);
-    
+
     return {
       connectedPages: pages.data.length,
       scheduledVideos: videos.data.filter((s: any) => s.status === 'pending').length,
@@ -70,6 +69,11 @@ export const api = {
     return res.data;
   },
 
+  updateKey: async (provider: ApiKey['provider'], id: string, payload: Partial<Pick<ApiKey, 'name' | 'key' | 'status'>>): Promise<ApiKey> => {
+    const res = await client.put(`/keys/${provider}/${id}`, payload);
+    return res.data;
+  },
+
   deleteKey: async (id: string, provider: ApiKey['provider']): Promise<void> => {
     await client.delete(`/keys/${provider}/${id}`);
   },
@@ -84,6 +88,16 @@ export const api = {
     return res.data;
   },
 
+  refreshFacebookPage: async (id: string): Promise<FacebookPage> => {
+    const res = await client.post(`/facebook/pages/${id}/refresh`);
+    return res.data;
+  },
+
+  updateFacebookPage: async (id: string, payload: Partial<Pick<FacebookPage, 'name' | 'accessToken'>>): Promise<FacebookPage> => {
+    const res = await client.put(`/facebook/pages/${id}`, payload);
+    return res.data;
+  },
+
   removeFacebookPage: async (id: string): Promise<void> => {
     await client.delete(`/facebook/pages/${id}`);
   },
@@ -91,6 +105,10 @@ export const api = {
   saveCatboxHash: async (hash: string): Promise<void> => {
     const settings = await client.get('/settings').then(r => r.data);
     await client.post('/settings', { ...settings, catboxHash: hash });
+  },
+
+  deleteCatboxHash: async (): Promise<void> => {
+    await client.delete('/settings/catbox');
   },
 
   getCatboxHash: async (): Promise<string> => {
