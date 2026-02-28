@@ -1,31 +1,56 @@
 import fs from 'node:fs';
+import ts from 'typescript';
 
-const file = 'src/pages/Settings.tsx';
-const src = fs.readFileSync(file, 'utf8');
-
-const forbidden = [
-  '<<<<<<<',
-  '=======',
-  '>>>>>>>',
+const filesToCheck = [
+  'package.json',
+  'server/services/videoService.ts',
+  'src/pages/Settings.tsx',
 ];
 
-for (const token of forbidden) {
-  if (src.includes(token)) {
-    console.error(`[prebuild-check] Merge conflict marker found in ${file}: ${token}`);
+const conflictMarkers = ['<<<<<<<', '=======', '>>>>>>>'];
+
+for (const file of filesToCheck) {
+  const src = fs.readFileSync(file, 'utf8');
+  for (const marker of conflictMarkers) {
+    if (src.includes(marker)) {
+      console.error(`[prebuild-check] Merge conflict marker found in ${file}: ${marker}`);
+      process.exit(1);
+    }
+  }
+}
+
+try {
+  JSON.parse(fs.readFileSync('package.json', 'utf8'));
+} catch (error) {
+  console.error('[prebuild-check] package.json is not valid JSON.');
+  console.error(error);
+  process.exit(1);
+}
+
+function checkTypeScriptSyntax(fileName, scriptKind) {
+  const source = fs.readFileSync(fileName, 'utf8');
+  const result = ts.transpileModule(source, {
+    compilerOptions: {
+      target: ts.ScriptTarget.ES2022,
+      module: ts.ModuleKind.ESNext,
+      jsx: ts.JsxEmit.ReactJSX,
+    },
+    fileName,
+    reportDiagnostics: true,
+  });
+
+  const diagnostics = (result.diagnostics || []).filter((d) => d.category === ts.DiagnosticCategory.Error);
+  if (diagnostics.length > 0) {
+    console.error(`[prebuild-check] Syntax diagnostics detected in ${fileName}:`);
+    for (const diag of diagnostics) {
+      const message = ts.flattenDiagnosticMessageText(diag.messageText, '\n');
+      console.error(`  - TS${diag.code}: ${message}`);
+    }
     process.exit(1);
   }
 }
 
-const setNameMatches = src.match(/setEditTokenName/g) ?? [];
-if (setNameMatches.length > 1) {
-  console.error('[prebuild-check] Duplicate setEditTokenName declaration pattern detected.');
-  process.exit(1);
-}
+checkTypeScriptSyntax('server/services/videoService.ts', ts.ScriptKind.TS);
+checkTypeScriptSyntax('src/pages/Settings.tsx', ts.ScriptKind.TSX);
 
-const setValueMatches = src.match(/setEditTokenValue/g) ?? [];
-if (setValueMatches.length > 1) {
-  console.error('[prebuild-check] Duplicate setEditTokenValue declaration pattern detected.');
-  process.exit(1);
-}
-
-console.log('[prebuild-check] Settings.tsx sanity checks passed.');
+console.log('[prebuild-check] Merge/syntax checks passed for package.json, videoService.ts, and Settings.tsx.');
