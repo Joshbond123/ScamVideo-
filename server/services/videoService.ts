@@ -9,7 +9,7 @@ import { readJson, PATHS } from '../db';
 export async function generateScript(niche: string, topic: string) {
   return withKeyFailover('cerebras', async (key) => {
     const response = await axios.post('https://api.cerebras.ai/v1/chat/completions', {
-      model: 'llama3.1-70b',
+      model: 'gpt-oss-120b',
       messages: [
         {
           role: 'system',
