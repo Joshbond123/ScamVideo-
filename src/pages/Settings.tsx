@@ -5,6 +5,7 @@ import { ApiKey, FacebookPage } from '../types';
 import { Badge, Button, Card, Input, Label } from '../components/ui';
 
 type Tab = 'keys' | 'facebook' | 'catbox';
+type NoticeType = 'success' | 'error';
 
 type EditKeyState = {
   id: string;
@@ -19,6 +20,14 @@ type EditPageState = {
   accessToken: string;
 } | null;
 
+type ProviderDraftState = Record<ApiKey['provider'], { name: string; key: string }>;
+
+const providers: Array<{ id: ApiKey['provider']; title: string; description: string }> = [
+  { id: 'cerebras', title: 'Cerebras Keys', description: 'Used for script generation.' },
+  { id: 'unrealspeech', title: 'UnrealSpeech Keys', description: 'Used for voice generation.' },
+  { id: 'workers-ai', title: 'Workers AI Keys', description: 'Used for image generation.' },
+];
+
 const providers: Array<{ id: ApiKey['provider']; title: string; description: string }> = [
   { id: 'cerebras', title: 'Cerebras Keys', description: 'Used for script generation.' },
   { id: 'unrealspeech', title: 'UnrealSpeech Keys', description: 'Used for voice generation.' },
@@ -28,6 +37,7 @@ const providers: Array<{ id: ApiKey['provider']; title: string; description: str
 export default function Settings() {
   const [tab, setTab] = useState<Tab>('keys');
   const [loading, setLoading] = useState(true);
+  const [notice, setNotice] = useState<{ type: NoticeType; message: string } | null>(null);
 
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [pages, setPages] = useState<FacebookPage[]>([]);
@@ -35,8 +45,11 @@ export default function Settings() {
   const [showCatboxHash, setShowCatboxHash] = useState(false);
 
   const [addProvider, setAddProvider] = useState<ApiKey['provider'] | null>(null);
-  const [newKeyName, setNewKeyName] = useState('');
-  const [newKeyValue, setNewKeyValue] = useState('');
+  const [providerDrafts, setProviderDrafts] = useState<ProviderDraftState>({
+    cerebras: { name: '', key: '' },
+    unrealspeech: { name: '', key: '' },
+    'workers-ai': { name: '', key: '' },
+  });
   const [editingKey, setEditingKey] = useState<EditKeyState>(null);
 
   const [facebookToken, setFacebookToken] = useState('');
@@ -45,6 +58,15 @@ export default function Settings() {
   useEffect(() => {
     void loadAll();
   }, []);
+
+  function showSuccess(message: string) {
+    setNotice({ type: 'success', message });
+  }
+
+  function showError(error: unknown, fallback: string) {
+    const message = error instanceof Error ? error.message : fallback;
+    setNotice({ type: 'error', message });
+  }
 
   async function loadAll() {
     setLoading(true);
@@ -61,6 +83,7 @@ export default function Settings() {
       setCatboxHash(typeof hash === 'string' ? hash : '');
     } catch (error) {
       console.error(error);
+      showError(error, 'Failed to load settings.');
     } finally {
       setLoading(false);
     }
@@ -72,37 +95,97 @@ export default function Settings() {
   );
 
   async function onAddKey(provider: ApiKey['provider']) {
-    if (!newKeyValue.trim()) return;
-    await api.addKey(provider, newKeyName.trim(), newKeyValue.trim());
-    setNewKeyName('');
-    setNewKeyValue('');
-    setAddProvider(null);
-    await loadAll();
+    const draft = providerDrafts[provider];
+    if (!draft.key.trim()) {
+      setNotice({ type: 'error', message: `Enter a key value for ${provider}.` });
+      return;
+    }
+
+    try {
+      await api.addKey(provider, draft.name.trim(), draft.key.trim());
+      setProviderDrafts((prev) => ({ ...prev, [provider]: { name: '', key: '' } }));
+      setAddProvider(null);
+      await loadAll();
+      showSuccess(`${provider} key saved successfully.`);
+    } catch (error) {
+      console.error(error);
+      showError(error, 'Failed to save API key.');
+    }
   }
 
   async function onSaveKeyEdit() {
     if (!editingKey) return;
-    await api.updateKey(editingKey.provider, editingKey.id, {
-      name: editingKey.name,
-      key: editingKey.key || undefined,
-    });
-    setEditingKey(null);
-    await loadAll();
+
+    try {
+      await api.updateKey(editingKey.provider, editingKey.id, {
+        name: editingKey.name,
+        key: editingKey.key || undefined,
+      });
+      setEditingKey(null);
+      await loadAll();
+      showSuccess('API key updated successfully.');
+    } catch (error) {
+      console.error(error);
+      showError(error, 'Failed to update API key.');
+    }
   }
 
   async function onDeleteKey(id: string, provider: ApiKey['provider']) {
     if (!confirm('Delete this key?')) return;
-    await api.deleteKey(id, provider);
-    await loadAll();
+
+    try {
+      await api.deleteKey(id, provider);
+      await loadAll();
+      showSuccess('API key deleted successfully.');
+    } catch (error) {
+      console.error(error);
+      showError(error, 'Failed to delete API key.');
+    }
   }
 
   async function onConnectFacebook() {
-    if (!facebookToken.trim()) return;
-    await api.connectFacebook(facebookToken.trim());
-    setFacebookToken('');
-    await loadAll();
+    if (!facebookToken.trim()) {
+      setNotice({ type: 'error', message: 'Enter a Facebook user or page access token.' });
+      return;
+    }
+
+    try {
+      const connected = await api.connectFacebook(facebookToken.trim());
+      setFacebookToken('');
+      await loadAll();
+      showSuccess(`Connected ${connected.length} page(s) successfully.`);
+    } catch (error) {
+      console.error(error);
+      showError(error, 'Failed to connect Facebook token.');
+    }
   }
 
+  async function onSavePageEdit() {
+    if (!editingPage) return;
+
+    try {
+      await api.updateFacebookPage(editingPage.id, {
+        name: editingPage.name,
+        accessToken: editingPage.accessToken,
+      });
+      setEditingPage(null);
+      await loadAll();
+      showSuccess('Facebook page updated successfully.');
+    } catch (error) {
+      console.error(error);
+      showError(error, 'Failed to update Facebook page.');
+    }
+  }
+
+  async function onRefreshPage(id: string) {
+    try {
+      await api.refreshFacebookPage(id);
+      await loadAll();
+      showSuccess('Facebook page refreshed successfully.');
+    } catch (error) {
+      console.error(error);
+      showError(error, 'Failed to refresh Facebook page.');
+    }
   async function onSavePageEdit() {
     if (!editingPage) return;
     await api.updateFacebookPage(editingPage.id, {
@@ -120,6 +203,26 @@ export default function Settings() {
 
   async function onRemovePage(id: string) {
     if (!confirm('Remove this page?')) return;
+
+    try {
+      await api.removeFacebookPage(id);
+      await loadAll();
+      showSuccess('Facebook page removed successfully.');
+    } catch (error) {
+      console.error(error);
+      showError(error, 'Failed to remove Facebook page.');
+    }
+  }
+
+  async function onSaveCatbox() {
+    try {
+      await api.saveCatboxHash(catboxHash.trim());
+      await loadAll();
+      showSuccess('Catbox settings saved successfully.');
+    } catch (error) {
+      console.error(error);
+      showError(error, 'Failed to save Catbox settings.');
+    }
     await api.removeFacebookPage(id);
     await loadAll();
   }
@@ -131,6 +234,15 @@ export default function Settings() {
 
   async function onDeleteCatbox() {
     if (!confirm('Delete Catbox hash?')) return;
+
+    try {
+      await api.deleteCatboxHash();
+      await loadAll();
+      showSuccess('Catbox hash deleted successfully.');
+    } catch (error) {
+      console.error(error);
+      showError(error, 'Failed to delete Catbox hash.');
+    }
     await api.deleteCatboxHash();
     await loadAll();
   }
@@ -143,6 +255,23 @@ export default function Settings() {
         <h1 className="text-2xl font-bold text-slate-900">Settings</h1>
         <p className="text-slate-500">Configure API keys, Facebook pages, and Catbox storage.</p>
       </div>
+
+      {notice && (
+        <div
+          className={`rounded-lg border px-4 py-3 text-sm ${
+            notice.type === 'success'
+              ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+              : 'bg-rose-50 text-rose-800 border-rose-200'
+          }`}
+        >
+          <div className="flex items-center justify-between gap-3">
+            <span>{notice.message}</span>
+            <button type="button" onClick={() => setNotice(null)} className="opacity-70 hover:opacity-100">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="flex items-center gap-2 p-1 bg-slate-100 rounded-xl w-fit">
         <button
@@ -188,6 +317,35 @@ export default function Settings() {
               {addProvider === group.id && (
                 <div className="space-y-2 p-3 rounded-lg bg-slate-50 border">
                   <Label>Key Label</Label>
+                  <Input
+                    value={providerDrafts[group.id].name}
+                    onChange={(e) =>
+                      setProviderDrafts((prev) => ({
+                        ...prev,
+                        [group.id]: { ...prev[group.id], name: e.target.value },
+                      }))
+                    }
+                    placeholder="Optional label"
+                  />
+                  <Label>API Key</Label>
+                  <Input
+                    value={providerDrafts[group.id].key}
+                    onChange={(e) =>
+                      setProviderDrafts((prev) => ({
+                        ...prev,
+                        [group.id]: { ...prev[group.id], key: e.target.value },
+                      }))
+                    }
+                    placeholder="Paste key"
+                    type="password"
+                  />
+                  <div className="flex gap-2 justify-end">
+                    <Button variant="ghost" size="sm" onClick={() => setAddProvider(null)}>
+                      Cancel
+                    </Button>
+                    <Button size="sm" onClick={() => void onAddKey(group.id)}>
+                      Save
+                    </Button>
                   <Input value={newKeyName} onChange={(e) => setNewKeyName(e.target.value)} placeholder="Optional label" />
                   <Label>API Key</Label>
                   <Input value={newKeyValue} onChange={(e) => setNewKeyValue(e.target.value)} placeholder="Paste key" type="password" />
@@ -240,6 +398,12 @@ export default function Settings() {
                           >
                             <Pencil className="w-4 h-4 mr-1" /> Edit
                           </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="text-red-600"
+                            onClick={() => void onDeleteKey(k.id, k.provider)}
+                          >
                           <Button variant="outline" size="sm" className="text-red-600" onClick={() => void onDeleteKey(k.id, k.provider)}>
                             <Trash2 className="w-4 h-4 mr-1" /> Delete
                           </Button>
@@ -258,6 +422,11 @@ export default function Settings() {
         <div className="space-y-6">
           <Card className="p-5 space-y-3 max-w-2xl">
             <Label>Facebook User Access Token</Label>
+            <Input
+              value={facebookToken}
+              onChange={(e) => setFacebookToken(e.target.value)}
+              placeholder="Paste user or page token"
+            />
             <Input value={facebookToken} onChange={(e) => setFacebookToken(e.target.value)} placeholder="Paste user token" />
             <Button onClick={() => void onConnectFacebook()}>Connect and Fetch Pages</Button>
           </Card>
@@ -290,6 +459,12 @@ export default function Settings() {
                         placeholder="Page access token"
                       />
                       <div className="flex gap-2 justify-end">
+                        <Button variant="ghost" size="sm" onClick={() => setEditingPage(null)}>
+                          Cancel
+                        </Button>
+                        <Button size="sm" onClick={() => void onSavePageEdit()}>
+                          Save
+                        </Button>
                         <Button variant="ghost" size="sm" onClick={() => setEditingPage(null)}>Cancel</Button>
                         <Button size="sm" onClick={() => void onSavePageEdit()}>Save</Button>
                       </div>
@@ -299,6 +474,11 @@ export default function Settings() {
                       <Button variant="outline" size="sm" onClick={() => void onRefreshPage(p.id)}>
                         <RefreshCw className="w-4 h-4 mr-1" /> Refresh
                       </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setEditingPage({ id: p.id, name: p.name, accessToken: p.accessToken })}
+                      >
                       <Button variant="outline" size="sm" onClick={() => setEditingPage({ id: p.id, name: p.name, accessToken: p.accessToken })}>
                         <Pencil className="w-4 h-4 mr-1" /> Edit
                       </Button>
@@ -334,7 +514,9 @@ export default function Settings() {
             </button>
           </div>
           <div className="flex gap-2 justify-end">
-            <Button variant="outline" onClick={() => void onDeleteCatbox()}>Delete</Button>
+            <Button variant="outline" onClick={() => void onDeleteCatbox()}>
+              Delete
+            </Button>
             <Button onClick={() => void onSaveCatbox()}>Save</Button>
           </div>
         </Card>

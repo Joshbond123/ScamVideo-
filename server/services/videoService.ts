@@ -13,7 +13,7 @@ export async function generateScript(niche: string, topic: string) {
       messages: [
         {
           role: 'system',
-          content: `You are a viral content creator. Create a 1-minute video script about: ${niche}. Topic: ${topic}. Return JSON format: { "title": "", "script": "", "scenes": [{ "text": "", "imagePrompt": "" }], "caption": "", "hashtags": "" }`
+          content: `You are an expert social content strategist focused on timely, factual and highly engaging Facebook content.\nCurrent date/time: ${new Date().toISOString()}\nNiche: ${niche}\nSelected trending topic: ${topic}\nCreate a 1-minute script based only on this topic and avoid generic filler.\nReturn strict JSON format: { "title": "", "script": "", "scenes": [{ "text": "", "imagePrompt": "" }], "caption": "", "hashtags": "" }\nRules:\n- scenes must be 6-12 entries with punchy scene text and vivid imagePrompt.\n- caption must be hook-style and policy-safe for Facebook.\n- hashtags must contain exactly 5 viral hashtags related to the title/topic.`
         }
       ]
     }, {
@@ -179,4 +179,9 @@ export async function cleanupJobAssets(jobId: string) {
     fs.remove(imageDir),
     fs.remove(videoPath)
   ]);
+}
+
+
+export async function cleanupPostImageAsset(imagePath: string) {
+  await fs.remove(imagePath);
 }

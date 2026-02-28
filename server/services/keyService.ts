@@ -1,24 +1,32 @@
 import { ApiKey } from '../../src/types';
 import { listApiKeys, patchApiKey } from './supabaseKeyStore';
 
+const providerRotationOffsets: Record<ApiKey['provider'], number> = {
+  cerebras: 0,
+  unrealspeech: 0,
+  'workers-ai': 0,
+};
+
 export async function getKeys(provider: ApiKey['provider']): Promise<ApiKey[]> {
   return await listApiKeys(provider);
 }
 
 export async function getActiveKeys(provider: ApiKey['provider']): Promise<ApiKey[]> {
   const keys = await getKeys(provider);
-  return keys
-    .filter((k) => k.status === 'active')
-    .sort((a, b) => {
-      if (!a.lastUsed) return -1;
-      if (!b.lastUsed) return 1;
-      return new Date(a.lastUsed).getTime() - new Date(b.lastUsed).getTime();
-    });
+  return keys.filter((k) => k.status === 'active');
+}
+
+function rotateKeys<T>(arr: T[], offset: number) {
+  if (arr.length === 0) return arr;
+  const idx = offset % arr.length;
+  return [...arr.slice(idx), ...arr.slice(0, idx)];
 }
 
 export async function getNextKey(provider: ApiKey['provider']): Promise<ApiKey | null> {
   const activeKeys = await getActiveKeys(provider);
-  return activeKeys[0] || null;
+  if (activeKeys.length === 0) return null;
+  const rotated = rotateKeys(activeKeys, providerRotationOffsets[provider]);
+  return rotated[0] || null;
 }
 
 export async function trackKeyUsage(id: string, provider: ApiKey['provider'], success: boolean) {
@@ -41,9 +49,13 @@ export async function withKeyFailover<T>(
   const activeKeys = await getActiveKeys(provider);
   if (activeKeys.length === 0) throw new Error(`No active ${provider} keys`);
 
-  let lastError: unknown;
+  const startOffset = providerRotationOffsets[provider] % activeKeys.length;
+  const orderedKeys = rotateKeys(activeKeys, startOffset);
 
-  for (const key of activeKeys) {
+  providerRotationOffsets[provider] = (providerRotationOffsets[provider] + 1) % Math.max(activeKeys.length, 1);
+
+  let lastError: unknown;
+  for (const key of orderedKeys) {
     try {
       const result = await executor(key);
       await trackKeyUsage(key.id, provider, true);

@@ -1,6 +1,7 @@
 import { readJson, updateJson, PATHS } from './db';
 import { Schedule } from '../src/types';
 import { discoverTopics, getUniqueTopic } from './services/topicService';
+import { generateScript, generateVoiceover, generateImage, assembleVideo, uploadToCatbox, cleanupJobAssets, generatePostImageWithTitleOverlay, cleanupPostImageAsset } from './services/videoService';
 import { generateScript, generateVoiceover, generateImage, assembleVideo, uploadToCatbox, cleanupJobAssets, generatePostImageWithTitleOverlay } from './services/videoService';
 import { postPhotoToFacebook, postVideoToFacebook } from './services/facebookService';
 
@@ -138,6 +139,7 @@ async function runPostPipeline(schedule: Schedule, topic: string) {
   // Upload post image and publish as a Facebook photo post so the overlayed title appears in-feed.
 
   const imageUrl = await uploadToCatbox(imgPath);
+  await cleanupPostImageAsset(imgPath);
   const fbResult = await postPhotoToFacebook(schedule.pageId, imageUrl, `${scriptData.caption}\n\n${scriptData.hashtags}`);
 
   await updateJson(PATHS.content.published_posts, (data: any) => [{
