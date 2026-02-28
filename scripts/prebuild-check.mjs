@@ -3,6 +3,9 @@ import ts from 'typescript';
 
 const filesToCheck = [
   'package.json',
+  'render.yaml',
+  'server/scheduler.ts',
+  'server/services/facebookService.ts',
   'server/services/videoService.ts',
   'src/pages/Settings.tsx',
 ];
@@ -50,7 +53,9 @@ function checkTypeScriptSyntax(fileName, scriptKind) {
   }
 }
 
+checkTypeScriptSyntax('server/scheduler.ts', ts.ScriptKind.TS);
+checkTypeScriptSyntax('server/services/facebookService.ts', ts.ScriptKind.TS);
 checkTypeScriptSyntax('server/services/videoService.ts', ts.ScriptKind.TS);
 checkTypeScriptSyntax('src/pages/Settings.tsx', ts.ScriptKind.TSX);
 
-console.log('[prebuild-check] Merge/syntax checks passed for package.json, videoService.ts, and Settings.tsx.');
+console.log('[prebuild-check] Merge/syntax checks passed for package/render + scheduler/facebook/video/settings files.');
