@@ -74,4 +74,10 @@ assertSingleOccurrence('server/scheduler.ts', 'async function runPostPipeline(')
 assertSingleOccurrence('server/services/facebookService.ts', 'export async function verifyTokenAndGetPages(');
 assertSingleOccurrence('server/services/facebookService.ts', 'export async function postPhotoToFacebook(');
 
+assertSingleOccurrence('src/pages/Settings.tsx', 'export default function Settings()');
+assertSingleOccurrence('src/pages/Settings.tsx', 'async function onSavePageEdit()');
+assertSingleOccurrence('src/pages/Settings.tsx', 'async function onSaveCatbox()');
+assertSingleOccurrence('server/scheduler.ts', 'export async function runJob(');
+assertSingleOccurrence('server/services/facebookService.ts', 'export async function postVideoToFacebook(');
+
 console.log('[prebuild-check] Merge/syntax checks passed for package/render + scheduler/facebook/video/settings files.');
