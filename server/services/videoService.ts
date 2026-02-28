@@ -3,37 +3,29 @@ import path from 'path';
 import fs from 'fs-extra';
 import axios from 'axios';
 import FormData from 'form-data';
-import { getNextKey, trackKeyUsage } from './keyService';
+import { withKeyFailover } from './keyService';
 import { readJson, PATHS } from '../db';
 
 export async function generateScript(niche: string, topic: string) {
-  const key = await getNextKey('cerebras');
-  if (!key) throw new Error('No active Cerebras key');
-
-  try {
+  return withKeyFailover('cerebras', async (key) => {
     const response = await axios.post('https://api.cerebras.ai/v1/chat/completions', {
       model: 'llama3.1-70b',
       messages: [
-        { role: 'system', content: `You are a viral content creator. Create a 1-minute video script about: ${niche}. Topic: ${topic}. 
-        Return JSON format: { "title": "", "script": "", "scenes": [{ "text": "", "imagePrompt": "" }], "caption": "", "hashtags": "" }` }
+        {
+          role: 'system',
+          content: `You are a viral content creator. Create a 1-minute video script about: ${niche}. Topic: ${topic}. Return JSON format: { "title": "", "script": "", "scenes": [{ "text": "", "imagePrompt": "" }], "caption": "", "hashtags": "" }`
+        }
       ]
     }, {
       headers: { 'Authorization': `Bearer ${key.key}` }
     });
 
-    await trackKeyUsage(key.id, 'cerebras', true);
     return JSON.parse(response.data.choices[0].message.content);
-  } catch (e) {
-    await trackKeyUsage(key.id, 'cerebras', false);
-    throw e;
-  }
+  });
 }
 
 export async function generateVoiceover(text: string, jobId: string) {
-  const key = await getNextKey('unrealspeech');
-  if (!key) throw new Error('No active UnrealSpeech key');
-
-  try {
+  return withKeyFailover('unrealspeech', async (key) => {
     const response = await axios.post('https://api.unrealspeech.com/stream', {
       Text: text,
       VoiceId: 'Will',
@@ -47,22 +39,18 @@ export async function generateVoiceover(text: string, jobId: string) {
 
     const filePath = path.join(process.cwd(), 'database/assets/audio', `${jobId}.mp3`);
     await fs.writeFile(filePath, response.data);
-    await trackKeyUsage(key.id, 'unrealspeech', true);
     return filePath;
-  } catch (e) {
-    await trackKeyUsage(key.id, 'unrealspeech', false);
-    throw e;
-  }
+  });
 }
 
 export async function generateImage(prompt: string, jobId: string, sceneIdx: number) {
-  const key = await getNextKey('workers-ai');
-  if (!key) throw new Error('No active Workers AI key');
+  return withKeyFailover('workers-ai', async (key) => {
+    const accountId = key.name?.trim();
+    if (!accountId) {
+      throw new Error('Workers AI key label must contain Cloudflare account id');
+    }
 
-  try {
-    // Mocking Workers AI call as it varies by account/model
-    // Usually it's a POST to Cloudflare API
-    const response = await axios.post(`https://api.cloudflare.com/client/v4/accounts/${key.name}/ai/run/@cf/bytedance/stable-diffusion-xl-lightning`, {
+    const response = await axios.post(`https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/bytedance/stable-diffusion-xl-lightning`, {
       prompt
     }, {
       headers: { 'Authorization': `Bearer ${key.key}` },
@@ -73,22 +61,18 @@ export async function generateImage(prompt: string, jobId: string, sceneIdx: num
     await fs.ensureDir(dir);
     const filePath = path.join(dir, `scene_${sceneIdx}.png`);
     await fs.writeFile(filePath, response.data);
-    await trackKeyUsage(key.id, 'workers-ai', true);
     return filePath;
-  } catch (e) {
-    await trackKeyUsage(key.id, 'workers-ai', false);
-    throw e;
-  }
+  });
 }
 
 export async function assembleVideo(jobId: string, audioPath: string, imagePaths: string[]) {
   const outputPath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.mp4`);
-  
+
   return new Promise<string>((resolve, reject) => {
     let command = ffmpeg();
 
-    imagePaths.forEach((img, i) => {
-      command = command.input(img).loop(5); // 5 seconds per image
+    imagePaths.forEach((img) => {
+      command = command.input(img).loop(5);
     });
 
     command
@@ -108,7 +92,7 @@ export async function assembleVideo(jobId: string, audioPath: string, imagePaths
 }
 
 export async function uploadToCatbox(filePath: string) {
-  const hash = await readJson<string>(PATHS.settings).then(s => (s as any).catboxHash);
+  const hash = await readJson<any>(PATHS.settings).then((s) => s?.catboxHash);
   if (!hash) throw new Error('Catbox hash not configured');
 
   const form = new FormData();
@@ -120,5 +104,18 @@ export async function uploadToCatbox(filePath: string) {
     headers: form.getHeaders()
   });
 
-  return response.data; // URL
+  return response.data;
+}
+
+
+export async function cleanupJobAssets(jobId: string) {
+  const audioPath = path.join(process.cwd(), 'database/assets/audio', `${jobId}.mp3`);
+  const imageDir = path.join(process.cwd(), 'database/assets/images', jobId);
+  const videoPath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.mp4`);
+
+  await Promise.all([
+    fs.remove(audioPath),
+    fs.remove(imageDir),
+    fs.remove(videoPath)
+  ]);
 }
