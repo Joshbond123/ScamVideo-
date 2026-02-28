@@ -5,18 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "npm run check:prebuild && npm run lint && vite build",
+    "build": "npm run prebuild && npm run lint && vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "start": "tsx server.ts",
     "prebuild": "node scripts/prebuild-check.mjs",
     "check:prebuild": "node scripts/prebuild-check.mjs"
-    "build": "npm run prebuild && npm run lint && vite build",
-    "preview": "vite preview",
-    "clean": "rm -rf dist",
-    "lint": "tsc --noEmit",
-    "start": "tsx server.ts"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",
