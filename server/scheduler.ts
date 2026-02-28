@@ -1,8 +1,8 @@
 import { readJson, updateJson, PATHS } from './db';
 import { Schedule } from '../src/types';
 import { discoverTopics, getUniqueTopic } from './services/topicService';
-import { generateScript, generateVoiceover, generateImage, assembleVideo, uploadToCatbox, cleanupJobAssets } from './services/videoService';
-import { postVideoToFacebook, postToFacebook } from './services/facebookService';
+import { generateScript, generateVoiceover, generateImage, assembleVideo, uploadToCatbox, cleanupJobAssets, generatePostImageWithTitleOverlay } from './services/videoService';
+import { postPhotoToFacebook, postVideoToFacebook } from './services/facebookService';
 
 let nextJobTimeout: NodeJS.Timeout | null = null;
 
@@ -133,14 +133,12 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
 
 async function runPostPipeline(schedule: Schedule, topic: string) {
   const scriptData = await generateScript(schedule.niche, topic);
-  const imgPath = await generateImage(scriptData.scenes[0].imagePrompt, schedule.id, 0);
+  const imgPath = await generatePostImageWithTitleOverlay(scriptData.scenes[0].imagePrompt, scriptData.title, schedule.id);
   
-  // For posts, we might just post text if image generation is too heavy, 
-  // but let's try to post with the first scene image.
-  // Facebook Graph API for photo posts is slightly different, but postToFacebook can handle text+link.
-  // For real photo upload, we'd need a public URL for the image too.
-  
-  const fbResult = await postToFacebook(schedule.pageId, `${scriptData.caption}\n\n${scriptData.hashtags}`);
+  // Upload post image and publish as a Facebook photo post so the overlayed title appears in-feed.
+
+  const imageUrl = await uploadToCatbox(imgPath);
+  const fbResult = await postPhotoToFacebook(schedule.pageId, imageUrl, `${scriptData.caption}\n\n${scriptData.hashtags}`);
 
   await updateJson(PATHS.content.published_posts, (data: any) => [{
     id: schedule.id,
@@ -150,6 +148,7 @@ async function runPostPipeline(schedule: Schedule, topic: string) {
     postedAt: new Date().toISOString(),
     status: 'published',
     facebookUrl: `https://facebook.com/${fbResult.id}`,
+    thumbnail: imageUrl,
     caption: scriptData.caption,
     hashtags: scriptData.hashtags
   }, ...data]);

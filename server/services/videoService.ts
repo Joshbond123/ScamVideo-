@@ -51,13 +51,6 @@ export async function generateImage(prompt: string, jobId: string, sceneIdx: num
     }
 
     const response = await axios.post(`https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/black-forest-labs/flux-2-dev`, {
-      prompt: `${prompt}. Photorealistic, highly detailed, cinematic lighting, realistic textures.`
-    const accountId = key.name?.trim();
-    if (!accountId) {
-      throw new Error('Workers AI key label must contain Cloudflare account id');
-    }
-
-    const response = await axios.post(`https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/bytedance/stable-diffusion-xl-lightning`, {
       prompt
     }, {
       headers: { 'Authorization': `Bearer ${key.key}` },
@@ -70,6 +63,67 @@ export async function generateImage(prompt: string, jobId: string, sceneIdx: num
     await fs.writeFile(filePath, response.data);
     return filePath;
   });
+}
+
+function wrapTitle(title: string, maxLineLength = 24, maxLines = 3) {
+  const words = title.trim().split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+
+  for (const word of words) {
+    if (!lines.length) {
+      lines.push(word);
+      continue;
+    }
+
+    const current = lines[lines.length - 1];
+    if (`${current} ${word}`.length <= maxLineLength) {
+      lines[lines.length - 1] = `${current} ${word}`;
+      continue;
+    }
+
+    if (lines.length < maxLines) {
+      lines.push(word);
+    } else {
+      lines[lines.length - 1] = `${lines[lines.length - 1]}...`;
+      break;
+    }
+  }
+
+  return lines.join('\n');
+}
+
+function escapeForDrawText(text: string) {
+  return text
+    .replace(/\\/g, '\\\\')
+    .replace(/:/g, '\\:')
+    .replace(/'/g, "\\'")
+    .replace(/%/g, '\\%')
+    .replace(/\n/g, '\\\\n');
+}
+
+export async function addTitleOverlayToImage(imagePath: string, title: string) {
+  const overlayPath = imagePath.replace(/\.png$/, '_overlay.png');
+  const escapedText = escapeForDrawText(wrapTitle(title));
+
+  await new Promise<void>((resolve, reject) => {
+    ffmpeg(imagePath)
+      .outputOptions([
+        '-vf',
+        `drawbox=x=40:y=1250:w=1000:h=560:color=black@0.45:t=fill,drawtext=text='${escapedText}':fontcolor=white:fontsize=80:x=(w-text_w)/2:y=1400:line_spacing=20:box=0`
+      ])
+      .frames(1)
+      .on('end', () => resolve())
+      .on('error', (error) => reject(error))
+      .save(overlayPath);
+  });
+
+  return overlayPath;
+}
+
+export async function generatePostImageWithTitleOverlay(prompt: string, title: string, jobId: string) {
+  const cleanPrompt = `${prompt}. No text, letters, words, logo, watermark, typography.`;
+  const imagePath = await generateImage(cleanPrompt, jobId, 0);
+  return addTitleOverlayToImage(imagePath, title);
 }
 
 export async function assembleVideo(jobId: string, audioPath: string, imagePaths: string[]) {
