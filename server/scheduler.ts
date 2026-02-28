@@ -1,10 +1,16 @@
 import { readJson, updateJson, PATHS } from './db';
 import { Schedule } from '../src/types';
 import { discoverTopics, getUniqueTopic } from './services/topicService';
-import { generateScript, generateVoiceover, generateImage, assembleVideo, uploadToCatbox } from './services/videoService';
+import { generateScript, generateVoiceover, generateImage, assembleVideo, uploadToCatbox, cleanupJobAssets } from './services/videoService';
 import { postVideoToFacebook, postToFacebook } from './services/facebookService';
 
 let nextJobTimeout: NodeJS.Timeout | null = null;
+
+export function requestSchedulerRefresh() {
+  scheduleNext().catch((error) => {
+    console.error('Failed to refresh scheduler:', error);
+  });
+}
 
 export async function startScheduler() {
   console.log('Scheduler starting...');
@@ -87,6 +93,8 @@ export async function runJob(schedule: Schedule) {
       status: 'error',
       message: `Job ${schedule.id} failed: ${error.message}`
     }, ...logs]);
+  } finally {
+    requestSchedulerRefresh();
   }
 }
 
@@ -103,7 +111,10 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
 
   const videoPath = await assembleVideo(jobId, audioPath, imagePaths);
   const videoUrl = await uploadToCatbox(videoPath);
-  
+
+  // Free-tier storage protection: remove temporary assets immediately after successful upload
+  await cleanupJobAssets(jobId);
+
   const fbResult = await postVideoToFacebook(schedule.pageId, videoUrl, `${scriptData.caption}\n\n${scriptData.hashtags}`);
   
   // Save to published
