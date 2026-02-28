@@ -74,6 +74,7 @@ export async function postToFacebook(pageId: string, message: string, link?: str
 export async function postPhotoToFacebook(pageId: string, imageUrl: string, caption: string) {
   const pages = await readJson<FacebookPage[]>(PATHS.facebook.pages);
   const page = pages.find((p) => p.id === pageId);
+  const page = pages.find(p => p.id === pageId);
   if (!page) throw new Error('Page not found');
 
   const url = `https://graph.facebook.com/v19.0/${pageId}/photos`;
@@ -81,6 +82,7 @@ export async function postPhotoToFacebook(pageId: string, imageUrl: string, capt
     url: imageUrl,
     caption,
     access_token: page.accessToken,
+    access_token: page.accessToken
   });
   return response.data;
 }

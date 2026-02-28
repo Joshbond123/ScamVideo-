@@ -28,6 +28,12 @@ const providers: Array<{ id: ApiKey['provider']; title: string; description: str
   { id: 'workers-ai', title: 'Workers AI Keys', description: 'Used for image generation.' },
 ];
 
+const providers: Array<{ id: ApiKey['provider']; title: string; description: string }> = [
+  { id: 'cerebras', title: 'Cerebras Keys', description: 'Used for script generation.' },
+  { id: 'unrealspeech', title: 'UnrealSpeech Keys', description: 'Used for voice generation.' },
+  { id: 'workers-ai', title: 'Workers AI Keys', description: 'Used for image generation.' },
+];
+
 export default function Settings() {
   const [tab, setTab] = useState<Tab>('keys');
   const [loading, setLoading] = useState(true);
@@ -180,6 +186,19 @@ export default function Settings() {
       console.error(error);
       showError(error, 'Failed to refresh Facebook page.');
     }
+  async function onSavePageEdit() {
+    if (!editingPage) return;
+    await api.updateFacebookPage(editingPage.id, {
+      name: editingPage.name,
+      accessToken: editingPage.accessToken,
+    });
+    setEditingPage(null);
+    await loadAll();
+  }
+
+  async function onRefreshPage(id: string) {
+    await api.refreshFacebookPage(id);
+    await loadAll();
   }
 
   async function onRemovePage(id: string) {
@@ -204,6 +223,13 @@ export default function Settings() {
       console.error(error);
       showError(error, 'Failed to save Catbox settings.');
     }
+    await api.removeFacebookPage(id);
+    await loadAll();
+  }
+
+  async function onSaveCatbox() {
+    await api.saveCatboxHash(catboxHash.trim());
+    await loadAll();
   }
 
   async function onDeleteCatbox() {
@@ -217,6 +243,8 @@ export default function Settings() {
       console.error(error);
       showError(error, 'Failed to delete Catbox hash.');
     }
+    await api.deleteCatboxHash();
+    await loadAll();
   }
 
   if (loading) return <div className="text-slate-500">Loading settings...</div>;
@@ -318,6 +346,12 @@ export default function Settings() {
                     <Button size="sm" onClick={() => void onAddKey(group.id)}>
                       Save
                     </Button>
+                  <Input value={newKeyName} onChange={(e) => setNewKeyName(e.target.value)} placeholder="Optional label" />
+                  <Label>API Key</Label>
+                  <Input value={newKeyValue} onChange={(e) => setNewKeyValue(e.target.value)} placeholder="Paste key" type="password" />
+                  <div className="flex gap-2 justify-end">
+                    <Button variant="ghost" size="sm" onClick={() => setAddProvider(null)}>Cancel</Button>
+                    <Button size="sm" onClick={() => void onAddKey(group.id)}>Save</Button>
                   </div>
                 </div>
               )}
@@ -370,6 +404,7 @@ export default function Settings() {
                             className="text-red-600"
                             onClick={() => void onDeleteKey(k.id, k.provider)}
                           >
+                          <Button variant="outline" size="sm" className="text-red-600" onClick={() => void onDeleteKey(k.id, k.provider)}>
                             <Trash2 className="w-4 h-4 mr-1" /> Delete
                           </Button>
                         </div>
@@ -392,6 +427,7 @@ export default function Settings() {
               onChange={(e) => setFacebookToken(e.target.value)}
               placeholder="Paste user or page token"
             />
+            <Input value={facebookToken} onChange={(e) => setFacebookToken(e.target.value)} placeholder="Paste user token" />
             <Button onClick={() => void onConnectFacebook()}>Connect and Fetch Pages</Button>
           </Card>
 
@@ -429,6 +465,8 @@ export default function Settings() {
                         <Button size="sm" onClick={() => void onSavePageEdit()}>
                           Save
                         </Button>
+                        <Button variant="ghost" size="sm" onClick={() => setEditingPage(null)}>Cancel</Button>
+                        <Button size="sm" onClick={() => void onSavePageEdit()}>Save</Button>
                       </div>
                     </div>
                   ) : (
@@ -441,6 +479,7 @@ export default function Settings() {
                         size="sm"
                         onClick={() => setEditingPage({ id: p.id, name: p.name, accessToken: p.accessToken })}
                       >
+                      <Button variant="outline" size="sm" onClick={() => setEditingPage({ id: p.id, name: p.name, accessToken: p.accessToken })}>
                         <Pencil className="w-4 h-4 mr-1" /> Edit
                       </Button>
                       <Button variant="outline" size="sm" className="text-red-600" onClick={() => void onRemovePage(p.id)}>

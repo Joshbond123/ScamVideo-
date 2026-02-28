@@ -2,6 +2,7 @@ import { readJson, updateJson, PATHS } from './db';
 import { Schedule } from '../src/types';
 import { discoverTopics, getUniqueTopic } from './services/topicService';
 import { generateScript, generateVoiceover, generateImage, assembleVideo, uploadToCatbox, cleanupJobAssets, generatePostImageWithTitleOverlay, cleanupPostImageAsset } from './services/videoService';
+import { generateScript, generateVoiceover, generateImage, assembleVideo, uploadToCatbox, cleanupJobAssets, generatePostImageWithTitleOverlay } from './services/videoService';
 import { postPhotoToFacebook, postVideoToFacebook } from './services/facebookService';
 
 let nextJobTimeout: NodeJS.Timeout | null = null;
