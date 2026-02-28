@@ -1,7 +1,7 @@
 import { readJson, updateJson, PATHS } from './db';
 import { Schedule } from '../src/types';
 import { discoverTopics, getUniqueTopic } from './services/topicService';
-import { generateScript, generateVoiceover, generateImage, assembleVideo, uploadToCatbox } from './services/videoService';
+import { generateScript, generateVoiceover, generateImage, assembleVideo, uploadToCatbox, cleanupJobAssets } from './services/videoService';
 import { postVideoToFacebook, postToFacebook } from './services/facebookService';
 
 let nextJobTimeout: NodeJS.Timeout | null = null;
@@ -111,7 +111,10 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
 
   const videoPath = await assembleVideo(jobId, audioPath, imagePaths);
   const videoUrl = await uploadToCatbox(videoPath);
-  
+
+  // Free-tier storage protection: remove temporary assets immediately after successful upload
+  await cleanupJobAssets(jobId);
+
   const fbResult = await postVideoToFacebook(schedule.pageId, videoUrl, `${scriptData.caption}\n\n${scriptData.hashtags}`);
   
   // Save to published

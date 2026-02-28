@@ -93,6 +93,11 @@ export const api = {
     return res.data;
   },
 
+  updateFacebookPage: async (id: string, payload: Partial<Pick<FacebookPage, 'name' | 'accessToken'>>): Promise<FacebookPage> => {
+    const res = await client.put(`/facebook/pages/${id}`, payload);
+    return res.data;
+  },
+
   removeFacebookPage: async (id: string): Promise<void> => {
     await client.delete(`/facebook/pages/${id}`);
   },
@@ -100,6 +105,10 @@ export const api = {
   saveCatboxHash: async (hash: string): Promise<void> => {
     const settings = await client.get('/settings').then(r => r.data);
     await client.post('/settings', { ...settings, catboxHash: hash });
+  },
+
+  deleteCatboxHash: async (): Promise<void> => {
+    await client.delete('/settings/catbox');
   },
 
   getCatboxHash: async (): Promise<string> => {

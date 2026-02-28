@@ -25,6 +25,12 @@ async function startServer() {
     res.json({ success: true });
   });
 
+  app.delete('/api/settings/catbox', async (req, res) => {
+    const current = await readJson<any>(PATHS.settings);
+    await writeJson(PATHS.settings, { ...current, catboxHash: '' });
+    res.json({ success: true });
+  });
+
   app.get('/api/keys/:provider', async (req, res) => {
     const provider = req.params.provider as ApiKey['provider'];
     res.json(await readJson(PATHS.keys[provider]));
@@ -130,6 +136,27 @@ async function startServer() {
       await updateJson<any[]>(PATHS.facebook.pages, (allPages) => allPages.map((p) => p.id === pageId ? updated : p));
       res.json(updated);
     }
+  });
+
+
+
+  app.put('/api/facebook/pages/:id', async (req, res) => {
+    const pageId = req.params.id;
+    const { name, accessToken } = req.body;
+
+    const pages = await readJson<any[]>(PATHS.facebook.pages);
+    const page = pages.find((p) => p.id === pageId);
+    if (!page) return res.status(404).json({ error: 'Page not found' });
+
+    const updated = {
+      ...page,
+      name: typeof name === 'string' && name.trim() ? name.trim() : page.name,
+      accessToken: typeof accessToken === 'string' && accessToken.trim() ? accessToken.trim() : page.accessToken,
+      lastChecked: new Date().toISOString()
+    };
+
+    await updateJson<any[]>(PATHS.facebook.pages, (allPages) => allPages.map((p) => p.id === pageId ? updated : p));
+    res.json(updated);
   });
 
   app.get('/api/facebook/pages', async (req, res) => {

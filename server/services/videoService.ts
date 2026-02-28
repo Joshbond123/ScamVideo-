@@ -106,3 +106,16 @@ export async function uploadToCatbox(filePath: string) {
 
   return response.data;
 }
+
+
+export async function cleanupJobAssets(jobId: string) {
+  const audioPath = path.join(process.cwd(), 'database/assets/audio', `${jobId}.mp3`);
+  const imageDir = path.join(process.cwd(), 'database/assets/images', jobId);
+  const videoPath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.mp4`);
+
+  await Promise.all([
+    fs.remove(audioPath),
+    fs.remove(imageDir),
+    fs.remove(videoPath)
+  ]);
+}
