@@ -1,10 +1,11 @@
 import { readJson, updateJson, PATHS } from './db';
 import { Schedule } from '../src/types';
 import { discoverTopics, getUniqueTopic } from './services/topicService';
-import { generateScript, generateVoiceover, generateImage, assembleVideo, uploadToCatbox, cleanupJobAssets } from './services/videoService';
-import { postVideoToFacebook, postToFacebook } from './services/facebookService';
+import { generateScript, generateVoiceover, generateImage, assembleVideo, uploadToCatbox, cleanupJobAssets, generatePostImageWithTitleOverlay, cleanupPostImageAsset } from './services/videoService';
+import { postPhotoToFacebook, postVideoToFacebook } from './services/facebookService';
 
 let nextJobTimeout: NodeJS.Timeout | null = null;
+const MAX_TIMEOUT_MS = 2_147_483_647; // Node.js setTimeout max (~24.8 days)
 
 export function requestSchedulerRefresh() {
   scheduleNext().catch((error) => {
@@ -38,10 +39,16 @@ async function scheduleNext() {
 
   console.log(`Next job scheduled in ${delay / 1000}s: ${nearest.id}`);
 
+  const timeout = Math.min(delay, MAX_TIMEOUT_MS);
   nextJobTimeout = setTimeout(async () => {
+    if (delay > MAX_TIMEOUT_MS) {
+      await scheduleNext();
+      return;
+    }
+
     await runJob(nearest);
     await scheduleNext();
-  }, delay);
+  }, timeout);
 }
 
 export async function runJob(schedule: Schedule) {
@@ -68,7 +75,10 @@ export async function runJob(schedule: Schedule) {
     // Handle recurrence
     if (schedule.isDaily) {
       const nextDate = new Date(schedule.scheduledAt);
-      nextDate.setDate(nextDate.getDate() + 1);
+      const now = new Date();
+      while (nextDate <= now) {
+        nextDate.setDate(nextDate.getDate() + 1);
+      }
       
       const newSchedule: Schedule = {
         ...schedule,
@@ -101,8 +111,12 @@ export async function runJob(schedule: Schedule) {
 async function runVideoPipeline(schedule: Schedule, topic: string) {
   const jobId = schedule.id;
   const scriptData = await generateScript(schedule.niche, topic);
+  if (!Array.isArray(scriptData.scenes) || scriptData.scenes.length === 0) {
+    throw new Error('Generated video script has no scenes');
+  }
+
   const audioPath = await generateVoiceover(scriptData.script, jobId);
-  
+
   const imagePaths: string[] = [];
   for (let i = 0; i < scriptData.scenes.length; i++) {
     const imgPath = await generateImage(scriptData.scenes[i].imagePrompt, jobId, i);
@@ -133,14 +147,17 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
 
 async function runPostPipeline(schedule: Schedule, topic: string) {
   const scriptData = await generateScript(schedule.niche, topic);
-  const imgPath = await generateImage(scriptData.scenes[0].imagePrompt, schedule.id, 0);
+  if (!Array.isArray(scriptData.scenes) || scriptData.scenes.length === 0) {
+    throw new Error('Generated post script has no scenes');
+  }
+
+  const imgPath = await generatePostImageWithTitleOverlay(scriptData.scenes[0].imagePrompt, scriptData.title, schedule.id);
   
-  // For posts, we might just post text if image generation is too heavy, 
-  // but let's try to post with the first scene image.
-  // Facebook Graph API for photo posts is slightly different, but postToFacebook can handle text+link.
-  // For real photo upload, we'd need a public URL for the image too.
-  
-  const fbResult = await postToFacebook(schedule.pageId, `${scriptData.caption}\n\n${scriptData.hashtags}`);
+  // Upload post image and publish as a Facebook photo post so the overlayed title appears in-feed.
+
+  const imageUrl = await uploadToCatbox(imgPath);
+  await cleanupPostImageAsset(imgPath);
+  const fbResult = await postPhotoToFacebook(schedule.pageId, imageUrl, `${scriptData.caption}\n\n${scriptData.hashtags}`);
 
   await updateJson(PATHS.content.published_posts, (data: any) => [{
     id: schedule.id,
@@ -150,6 +167,7 @@ async function runPostPipeline(schedule: Schedule, topic: string) {
     postedAt: new Date().toISOString(),
     status: 'published',
     facebookUrl: `https://facebook.com/${fbResult.id}`,
+    thumbnail: imageUrl,
     caption: scriptData.caption,
     hashtags: scriptData.hashtags
   }, ...data]);
