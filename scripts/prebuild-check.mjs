@@ -69,5 +69,9 @@ function assertSingleOccurrence(fileName, needle) {
 
 assertSingleOccurrence('src/pages/Settings.tsx', 'const providers:');
 assertSingleOccurrence('src/pages/Settings.tsx', 'async function onConnectFacebook()');
+assertSingleOccurrence('server/scheduler.ts', 'async function runVideoPipeline(');
+assertSingleOccurrence('server/scheduler.ts', 'async function runPostPipeline(');
+assertSingleOccurrence('server/services/facebookService.ts', 'export async function verifyTokenAndGetPages(');
+assertSingleOccurrence('server/services/facebookService.ts', 'export async function postPhotoToFacebook(');
 
 console.log('[prebuild-check] Merge/syntax checks passed for package/render + scheduler/facebook/video/settings files.');
