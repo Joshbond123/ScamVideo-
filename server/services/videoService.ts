@@ -45,6 +45,13 @@ export async function generateVoiceover(text: string, jobId: string) {
 
 export async function generateImage(prompt: string, jobId: string, sceneIdx: number) {
   return withKeyFailover('workers-ai', async (key) => {
+    const accountId = process.env.CLOUDFLARE_ACCOUNT_ID || key.name?.trim();
+    if (!accountId) {
+      throw new Error('Cloudflare account id missing. Set CLOUDFLARE_ACCOUNT_ID or use key label as account id.');
+    }
+
+    const response = await axios.post(`https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/black-forest-labs/flux-2-dev`, {
+      prompt: `${prompt}. Photorealistic, highly detailed, cinematic lighting, realistic textures.`
     const accountId = key.name?.trim();
     if (!accountId) {
       throw new Error('Workers AI key label must contain Cloudflare account id');

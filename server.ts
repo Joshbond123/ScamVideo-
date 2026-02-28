@@ -1,4 +1,5 @@
 import express from 'express';
+import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { initDb, readJson, updateJson, writeJson, PATHS, appendJson } from './server/db';
 import { startScheduler, runJob, requestSchedulerRefresh } from './server/scheduler';
@@ -229,6 +230,9 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     app.use(express.static('dist'));
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(process.cwd(), 'dist', 'index.html'));
+    });
   }
 
   app.listen(PORT, "0.0.0.0", () => {
