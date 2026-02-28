@@ -1,12 +1,11 @@
 import axios from 'axios';
-import { 
-  DashboardStats, 
-  Schedule, 
-  PublishedItem, 
-  ApiKey, 
-  FacebookPage, 
-  LogEntry, 
-  Niche
+import {
+  DashboardStats,
+  Schedule,
+  PublishedItem,
+  ApiKey,
+  FacebookPage,
+  LogEntry,
 } from '../types';
 
 const client = axios.create({
@@ -22,7 +21,7 @@ export const api = {
       client.get('/content/published-videos'),
       client.get('/content/published-posts')
     ]);
-    
+
     return {
       connectedPages: pages.data.length,
       scheduledVideos: videos.data.filter((s: any) => s.status === 'pending').length,
@@ -70,6 +69,11 @@ export const api = {
     return res.data;
   },
 
+  updateKey: async (provider: ApiKey['provider'], id: string, payload: Partial<Pick<ApiKey, 'name' | 'key' | 'status'>>): Promise<ApiKey> => {
+    const res = await client.put(`/keys/${provider}/${id}`, payload);
+    return res.data;
+  },
+
   deleteKey: async (id: string, provider: ApiKey['provider']): Promise<void> => {
     await client.delete(`/keys/${provider}/${id}`);
   },
@@ -81,6 +85,11 @@ export const api = {
 
   getFacebookPages: async (): Promise<FacebookPage[]> => {
     const res = await client.get('/facebook/pages');
+    return res.data;
+  },
+
+  refreshFacebookPage: async (id: string): Promise<FacebookPage> => {
+    const res = await client.post(`/facebook/pages/${id}/refresh`);
     return res.data;
   },
 

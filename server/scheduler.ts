@@ -6,6 +6,12 @@ import { postVideoToFacebook, postToFacebook } from './services/facebookService'
 
 let nextJobTimeout: NodeJS.Timeout | null = null;
 
+export function requestSchedulerRefresh() {
+  scheduleNext().catch((error) => {
+    console.error('Failed to refresh scheduler:', error);
+  });
+}
+
 export async function startScheduler() {
   console.log('Scheduler starting...');
   await scheduleNext();
@@ -87,6 +93,8 @@ export async function runJob(schedule: Schedule) {
       status: 'error',
       message: `Job ${schedule.id} failed: ${error.message}`
     }, ...logs]);
+  } finally {
+    requestSchedulerRefresh();
   }
 }
 
