@@ -5,6 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
+    "build": "npm run check:prebuild && npm run lint && vite build",
+    "preview": "vite preview",
+    "clean": "rm -rf dist",
+    "lint": "tsc --noEmit",
+    "start": "tsx server.ts",
+    "prebuild": "node scripts/prebuild-check.mjs",
+    "check:prebuild": "node scripts/prebuild-check.mjs"
     "build": "npm run prebuild && npm run lint && vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",
@@ -13,6 +20,7 @@
   },
   "dependencies": {
     "@google/genai": "^1.29.0",
+    "@supabase/supabase-js": "^2.56.1",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",
     "axios": "^1.13.6",
