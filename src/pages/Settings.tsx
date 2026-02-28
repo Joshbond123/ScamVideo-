@@ -157,6 +157,31 @@ export default function Settings() {
     } catch (error) {
       console.error(error);
       showError(error, 'Failed to connect Facebook token.');
+
+    try {
+      await api.deleteKey(id, provider);
+      await loadAll();
+      showSuccess('API key deleted successfully.');
+    } catch (error) {
+      console.error(error);
+      showError(error, 'Failed to delete API key.');
+    }
+  }
+
+  async function onConnectFacebook() {
+    if (!facebookToken.trim()) {
+      setNotice({ type: 'error', message: 'Enter a Facebook user or page access token.' });
+      return;
+    }
+
+    try {
+      const connected = await api.connectFacebook(facebookToken.trim());
+      setFacebookToken('');
+      await loadAll();
+      showSuccess(`Connected ${connected.length} page(s) successfully.`);
+    } catch (error) {
+      console.error(error);
+      showError(error, 'Failed to connect Facebook token.');
     }
   }
 
@@ -188,17 +213,30 @@ export default function Settings() {
     }
   async function onSavePageEdit() {
     if (!editingPage) return;
-    await api.updateFacebookPage(editingPage.id, {
-      name: editingPage.name,
-      accessToken: editingPage.accessToken,
-    });
-    setEditingPage(null);
-    await loadAll();
+
+    try {
+      await api.updateFacebookPage(editingPage.id, {
+        name: editingPage.name,
+        accessToken: editingPage.accessToken,
+      });
+      setEditingPage(null);
+      await loadAll();
+      showSuccess('Facebook page updated successfully.');
+    } catch (error) {
+      console.error(error);
+      showError(error, 'Failed to update Facebook page.');
+    }
   }
 
   async function onRefreshPage(id: string) {
-    await api.refreshFacebookPage(id);
-    await loadAll();
+    try {
+      await api.refreshFacebookPage(id);
+      await loadAll();
+      showSuccess('Facebook page refreshed successfully.');
+    } catch (error) {
+      console.error(error);
+      showError(error, 'Failed to refresh Facebook page.');
+    }
   }
 
   async function onRemovePage(id: string) {
@@ -211,6 +249,17 @@ export default function Settings() {
     } catch (error) {
       console.error(error);
       showError(error, 'Failed to remove Facebook page.');
+    }
+  }
+
+  async function onSaveCatbox() {
+    try {
+      await api.saveCatboxHash(catboxHash.trim());
+      await loadAll();
+      showSuccess('Catbox settings saved successfully.');
+    } catch (error) {
+      console.error(error);
+      showError(error, 'Failed to save Catbox settings.');
     }
   }
 
