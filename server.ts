@@ -2,6 +2,7 @@ import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { initDb, readJson, updateJson, writeJson, PATHS, appendJson } from './server/db';
+import { deleteApiKey, insertApiKey, listApiKeys, patchApiKey } from './server/services/supabaseKeyStore';
 import { startScheduler, runJob, requestSchedulerRefresh } from './server/scheduler';
 import { verifyTokenAndGetPages } from './server/services/facebookService';
 import { ApiKey, Schedule } from './src/types';
@@ -34,7 +35,11 @@ async function startServer() {
 
   app.get('/api/keys/:provider', async (req, res) => {
     const provider = req.params.provider as ApiKey['provider'];
-    res.json(await readJson(PATHS.keys[provider]));
+    try {
+      res.json(await listApiKeys(provider));
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
   });
 
   app.post('/api/keys/:provider', async (req, res) => {
@@ -42,18 +47,22 @@ async function startServer() {
     const { name, key } = req.body;
     if (!key) return res.status(400).json({ error: 'Key value is required' });
 
-    const existing = await readJson<ApiKey[]>(PATHS.keys[provider]);
-    const newKey: ApiKey = {
-      id: Math.random().toString(36).substr(2, 9),
-      provider,
-      name: name?.trim() || `Key #${existing.length + 1}`,
-      key,
-      successCount: 0,
-      failCount: 0,
-      status: 'active'
-    };
-    await appendJson(PATHS.keys[provider], newKey);
-    res.json(newKey);
+    try {
+      const existing = await listApiKeys(provider);
+      const newKey: ApiKey = {
+        id: Math.random().toString(36).substr(2, 9),
+        provider,
+        name: name?.trim() || `Key #${existing.length + 1}`,
+        key,
+        successCount: 0,
+        failCount: 0,
+        status: 'active'
+      };
+      const inserted = await insertApiKey(newKey);
+      res.json(inserted);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
   });
 
   app.put('/api/keys/:provider/:id', async (req, res) => {
@@ -62,28 +71,34 @@ async function startServer() {
     const { name, key, status } = req.body;
     let updatedKey: ApiKey | null = null;
 
-    await updateJson<ApiKey[]>(PATHS.keys[provider], (keys) => keys.map((existing, idx) => {
-      if (existing.id !== id) return existing;
+    try {
+      const existing = await listApiKeys(provider);
+      const current = existing.find((k) => k.id === id);
+      if (!current) return res.status(404).json({ error: 'Key not found' });
 
+      const idx = existing.findIndex((k) => k.id === id);
       updatedKey = {
-        ...existing,
-        name: typeof name === 'string' ? (name.trim() || `Key #${idx + 1}`) : existing.name,
-        key: typeof key === 'string' && key.trim() ? key.trim() : existing.key,
+        ...current,
+        name: typeof name === 'string' ? (name.trim() || `Key #${idx + 1}`) : current.name,
+        key: typeof key === 'string' && key.trim() ? key.trim() : current.key,
         status: status === 'inactive' ? 'inactive' : 'active'
       };
-
-      return updatedKey;
-    }));
-
-    if (!updatedKey) return res.status(404).json({ error: 'Key not found' });
-    res.json(updatedKey);
+      await patchApiKey(provider, id, updatedKey);
+      return res.json(updatedKey);
+    } catch (error: any) {
+      return res.status(500).json({ error: error.message });
+    }
   });
 
   app.delete('/api/keys/:provider/:id', async (req, res) => {
     const provider = req.params.provider as ApiKey['provider'];
     const id = req.params.id;
-    await updateJson<ApiKey[]>(PATHS.keys[provider], (keys) => keys.filter(k => k.id !== id));
-    res.json({ success: true });
+    try {
+      await deleteApiKey(provider, id);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
   });
 
   // Facebook

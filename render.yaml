@@ -3,7 +3,7 @@ services:
     name: scamvideo-studio
     env: node
     plan: free
-    buildCommand: npm ci && npm run build
+    buildCommand: npm ci --include=dev && npm run build
     startCommand: npm run start
     autoDeploy: true
     envVars:
@@ -11,3 +11,7 @@ services:
         value: 22
       - key: NODE_ENV
         value: production
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false

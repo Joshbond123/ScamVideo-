@@ -1,6 +1,7 @@
 import fs from 'fs-extra';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
+import { createClient } from '@supabase/supabase-js';
 
 const DB_ROOT = path.join(process.cwd(), 'database');
 
@@ -29,6 +30,68 @@ const PATHS = {
   usage: path.join(DB_ROOT, 'usage/key_usage.json'),
 };
 
+let supabase: ReturnType<typeof createClient> | null = null;
+let supabaseStateUnavailable = false;
+
+function getSupabase() {
+  if (supabase) return supabase;
+  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) return null;
+  supabase = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
+  return supabase;
+}
+
+function resolveStateKey(filePath: string): string | null {
+  const map: Record<string, string> = {
+    [PATHS.settings]: 'settings',
+    [PATHS.facebook.pages]: 'facebook_pages',
+    [PATHS.schedules.video]: 'schedules_video',
+    [PATHS.schedules.post]: 'schedules_post',
+    [PATHS.content.published_videos]: 'published_videos',
+    [PATHS.content.published_posts]: 'published_posts',
+    [PATHS.topics.history]: 'topic_history',
+    [PATHS.logs]: 'logs',
+  };
+  return map[filePath] || null;
+}
+
+async function readFromSupabaseState<T>(stateKey: string, fallback: T): Promise<T | null> {
+  if (supabaseStateUnavailable) return null;
+  const client = getSupabase();
+  if (!client) return null;
+
+  const { data, error } = await (client as any)
+    .from('app_state')
+    .select('value')
+    .eq('key', stateKey)
+    .maybeSingle();
+
+  if (error) {
+    console.warn(`Supabase app_state read failed (${stateKey}), using filesystem fallback:`, error.message);
+    supabaseStateUnavailable = true;
+    return null;
+  }
+
+  if (!data || data.value === null || data.value === undefined) return fallback;
+  return data.value as T;
+}
+
+async function writeToSupabaseState<T>(stateKey: string, data: T): Promise<boolean> {
+  if (supabaseStateUnavailable) return false;
+  const client = getSupabase();
+  if (!client) return false;
+
+  const payload = { key: stateKey, value: data, updated_at: new Date().toISOString() };
+  const { error } = await (client as any).from('app_state').upsert(payload, { onConflict: 'key' });
+  if (error) {
+    console.warn(`Supabase app_state write failed (${stateKey}), using filesystem fallback:`, error.message);
+    supabaseStateUnavailable = true;
+    return false;
+  }
+  return true;
+}
+
 // Initialize folders
 export async function initDb() {
   await fs.ensureDir(DB_ROOT);
@@ -43,7 +106,6 @@ export async function initDb() {
   await fs.ensureDir(path.join(DB_ROOT, 'assets/videos'));
   await fs.ensureDir(path.join(DB_ROOT, 'locks'));
 
-  // Ensure files exist
   const ensureFile = async (p: string) => {
     if (!(await fs.pathExists(p))) {
       await fs.writeJson(p, p.includes('settings') ? {} : []);
@@ -68,20 +130,34 @@ export async function readJson<T>(filePath: string): Promise<T> {
     console.error('readJson called with undefined or empty filePath');
     return [] as T;
   }
+
+  const defaultData = filePath.includes('settings') ? ({} as T) : ([] as T);
+
+  const stateKey = resolveStateKey(filePath);
+  if (stateKey) {
+    const remote = await readFromSupabaseState<T>(stateKey, defaultData);
+    if (remote !== null) return remote;
+  }
+
   try {
     if (!(await fs.pathExists(filePath))) {
-      const defaultData = filePath.includes('settings') ? {} : [];
       await fs.writeJson(filePath, defaultData);
-      return defaultData as T;
+      return defaultData;
     }
     return await fs.readJson(filePath);
   } catch (error) {
     console.error(`Error reading JSON from ${filePath}:`, error);
-    return (filePath && filePath.includes('settings') ? {} : []) as T;
+    return defaultData;
   }
 }
 
 export async function writeJson<T>(filePath: string, data: T): Promise<void> {
+  const stateKey = resolveStateKey(filePath);
+  if (stateKey) {
+    const wroteRemote = await writeToSupabaseState(stateKey, data);
+    if (wroteRemote) return;
+  }
+
   const tempPath = `${filePath}.${uuidv4()}.tmp`;
   await fs.writeJson(tempPath, data);
   await fs.rename(tempPath, filePath);
