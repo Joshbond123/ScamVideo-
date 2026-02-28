@@ -31,6 +31,8 @@ export async function trackKeyUsage(id: string, provider: ApiKey['provider'], su
     failCount: key.failCount + (success ? 0 : 1),
     lastUsed: new Date().toISOString(),
   });
+    status: key.status,
+  }));
 }
 
 export async function withKeyFailover<T>(
@@ -51,6 +53,18 @@ export async function withKeyFailover<T>(
       lastError = error;
       await trackKeyUsage(key.id, provider, false);
     }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(`All ${provider} keys failed`);
+}
+
+export async function updateKey(id: string, provider: ApiKey['provider'], updater: (key: ApiKey) => ApiKey) {
+  const filePath = PATHS.keys[provider];
+  const keys = await readJson<ApiKey[]>(filePath);
+  const index = keys.findIndex(k => k.id === id);
+  if (index !== -1) {
+    keys[index] = updater(keys[index]);
+    await writeJson(filePath, keys);
   }
 
   throw lastError instanceof Error ? lastError : new Error(`All ${provider} keys failed`);

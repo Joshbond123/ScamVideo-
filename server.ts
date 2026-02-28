@@ -88,6 +88,41 @@ async function startServer() {
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
+    const existing = await readJson<ApiKey[]>(PATHS.keys[provider]);
+    const newKey: ApiKey = {
+      id: Math.random().toString(36).substr(2, 9),
+      provider,
+      name: name?.trim() || `Key #${existing.length + 1}`,
+      key,
+      successCount: 0,
+      failCount: 0,
+      status: 'active'
+    };
+    await appendJson(PATHS.keys[provider], newKey);
+    res.json(newKey);
+  });
+
+  app.put('/api/keys/:provider/:id', async (req, res) => {
+    const provider = req.params.provider as ApiKey['provider'];
+    const id = req.params.id;
+    const { name, key, status } = req.body;
+    let updatedKey: ApiKey | null = null;
+
+    await updateJson<ApiKey[]>(PATHS.keys[provider], (keys) => keys.map((existing, idx) => {
+      if (existing.id !== id) return existing;
+
+      updatedKey = {
+        ...existing,
+        name: typeof name === 'string' ? (name.trim() || `Key #${idx + 1}`) : existing.name,
+        key: typeof key === 'string' && key.trim() ? key.trim() : existing.key,
+        status: status === 'inactive' ? 'inactive' : 'active'
+      };
+
+      return updatedKey;
+    }));
+
+    if (!updatedKey) return res.status(404).json({ error: 'Key not found' });
+    res.json(updatedKey);
   });
 
   app.delete('/api/keys/:provider/:id', async (req, res) => {
