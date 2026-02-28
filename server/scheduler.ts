@@ -69,7 +69,10 @@ export async function runJob(schedule: Schedule) {
     // Handle recurrence
     if (schedule.isDaily) {
       const nextDate = new Date(schedule.scheduledAt);
-      nextDate.setDate(nextDate.getDate() + 1);
+      const now = new Date();
+      while (nextDate <= now) {
+        nextDate.setDate(nextDate.getDate() + 1);
+      }
       
       const newSchedule: Schedule = {
         ...schedule,
@@ -102,8 +105,12 @@ export async function runJob(schedule: Schedule) {
 async function runVideoPipeline(schedule: Schedule, topic: string) {
   const jobId = schedule.id;
   const scriptData = await generateScript(schedule.niche, topic);
+  if (!Array.isArray(scriptData.scenes) || scriptData.scenes.length === 0) {
+    throw new Error('Generated video script has no scenes');
+  }
+
   const audioPath = await generateVoiceover(scriptData.script, jobId);
-  
+
   const imagePaths: string[] = [];
   for (let i = 0; i < scriptData.scenes.length; i++) {
     const imgPath = await generateImage(scriptData.scenes[i].imagePrompt, jobId, i);
