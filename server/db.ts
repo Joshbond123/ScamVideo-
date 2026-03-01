@@ -1,6 +1,7 @@
 import fs from 'fs-extra';
 import path from 'path';
-import { v4 as uuidv4 } from 'uuid';
+import axios from 'axios';
+import crypto from 'crypto';
 
 const DB_ROOT = path.join(process.cwd(), 'database');
 
@@ -29,62 +30,135 @@ const PATHS = {
   usage: path.join(DB_ROOT, 'usage/key_usage.json'),
 };
 
-// Initialize folders
+function getSupabaseConfigOrThrow() {
+  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) {
+    throw new Error('Supabase is required. Missing SUPABASE_URL/NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
+  }
+  return { url, key };
+}
+
+function getSupabaseRestClient() {
+  const { url, key } = getSupabaseConfigOrThrow();
+  return axios.create({
+    baseURL: `${url}/rest/v1`,
+    headers: {
+      apikey: key,
+      Authorization: `Bearer ${key}`,
+      'Content-Type': 'application/json',
+    },
+    timeout: 30_000,
+    proxy: false,
+  });
+}
+
+function resolveStateKey(filePath: string): string | null {
+  const map: Record<string, string> = {
+    [PATHS.settings]: 'settings',
+    [PATHS.facebook.pages]: 'facebook_pages',
+    [PATHS.schedules.video]: 'schedules_video',
+    [PATHS.schedules.post]: 'schedules_post',
+    [PATHS.content.published_videos]: 'published_videos',
+    [PATHS.content.published_posts]: 'published_posts',
+    [PATHS.topics.history]: 'topic_history',
+    [PATHS.logs]: 'logs',
+  };
+  return map[filePath] || null;
+}
+
+type StateRow = {
+  id: string;
+  key_name: string;
+  encrypted_key: string;
+};
+
+async function getStateRow(stateKey: string): Promise<StateRow | null> {
+  const client = getSupabaseRestClient();
+  const response = await client.get('/api_keys', {
+    params: {
+      key_type: 'eq.state',
+      key_name: `eq.${stateKey}`,
+      select: 'id,key_name,encrypted_key',
+      order: 'updated_at.desc',
+      limit: 1,
+    },
+  });
+
+  const rows = Array.isArray(response.data) ? response.data : [];
+  return (rows[0] as StateRow | undefined) || null;
+}
+
+async function readFromSupabaseState<T>(stateKey: string, fallback: T): Promise<T> {
+  const row = await getStateRow(stateKey);
+  if (!row) return fallback;
+
+  try {
+    return JSON.parse(row.encrypted_key) as T;
+  } catch (error) {
+    throw new Error(`Failed to parse state payload for ${stateKey}: ${error}`);
+  }
+}
+
+async function writeToSupabaseState<T>(stateKey: string, data: T): Promise<void> {
+  const client = getSupabaseRestClient();
+  const payload = JSON.stringify(data);
+  const existing = await getStateRow(stateKey);
+
+  if (existing) {
+    await client.patch(
+      '/api_keys',
+      { encrypted_key: payload, updated_at: new Date().toISOString() },
+      {
+        params: {
+          key_type: 'eq.state',
+          key_name: `eq.${stateKey}`,
+        },
+      }
+    );
+    return;
+  }
+
+  await client.post('/api_keys', [
+    {
+      id: crypto.randomUUID(),
+      key_type: 'state',
+      key_name: stateKey,
+      encrypted_key: payload,
+      metadata: {},
+    },
+  ]);
+}
+
+// Initialize folders only for generated runtime assets/locks.
 export async function initDb() {
-  await fs.ensureDir(DB_ROOT);
-  await fs.ensureDir(path.join(DB_ROOT, 'keys'));
-  await fs.ensureDir(path.join(DB_ROOT, 'facebook'));
-  await fs.ensureDir(path.join(DB_ROOT, 'schedules'));
-  await fs.ensureDir(path.join(DB_ROOT, 'content'));
-  await fs.ensureDir(path.join(DB_ROOT, 'topics'));
-  await fs.ensureDir(path.join(DB_ROOT, 'usage'));
   await fs.ensureDir(path.join(DB_ROOT, 'assets/audio'));
   await fs.ensureDir(path.join(DB_ROOT, 'assets/images'));
   await fs.ensureDir(path.join(DB_ROOT, 'assets/videos'));
   await fs.ensureDir(path.join(DB_ROOT, 'locks'));
-
-  // Ensure files exist
-  const ensureFile = async (p: string) => {
-    if (!(await fs.pathExists(p))) {
-      await fs.writeJson(p, p.includes('settings') ? {} : []);
-    }
-  };
-
-  for (const p of Object.values(PATHS)) {
-    if (typeof p === 'string') {
-      await ensureFile(p);
-    } else {
-      for (const subP of Object.values(p)) {
-        if (typeof subP === 'string') {
-          await ensureFile(subP);
-        }
-      }
-    }
-  }
 }
 
 export async function readJson<T>(filePath: string): Promise<T> {
   if (!filePath) {
-    console.error('readJson called with undefined or empty filePath');
-    return [] as T;
+    throw new Error('readJson called with undefined or empty filePath');
   }
-  try {
-    if (!(await fs.pathExists(filePath))) {
-      const defaultData = filePath.includes('settings') ? {} : [];
-      await fs.writeJson(filePath, defaultData);
-      return defaultData as T;
-    }
-    return await fs.readJson(filePath);
-  } catch (error) {
-    console.error(`Error reading JSON from ${filePath}:`, error);
-    return (filePath && filePath.includes('settings') ? {} : []) as T;
+
+  const stateKey = resolveStateKey(filePath);
+  if (!stateKey) {
+    throw new Error(`Unsupported non-Supabase state path: ${filePath}`);
   }
+
+  const defaultData = filePath.includes('settings') ? ({} as T) : ([] as T);
+  return readFromSupabaseState<T>(stateKey, defaultData);
 }
 
 export async function writeJson<T>(filePath: string, data: T): Promise<void> {
-  const tempPath = `${filePath}.${uuidv4()}.tmp`;
-  await fs.writeJson(tempPath, data);
-  await fs.rename(tempPath, filePath);
+  const stateKey = resolveStateKey(filePath);
+  if (!stateKey) {
+    throw new Error(`Unsupported non-Supabase state path: ${filePath}`);
+  }
+
+  await writeToSupabaseState(stateKey, data);
 }
 
 export async function updateJson<T>(filePath: string, updater: (data: T) => T): Promise<void> {
