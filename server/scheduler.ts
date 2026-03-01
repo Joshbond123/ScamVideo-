@@ -91,9 +91,6 @@ async function validateRequiredConfig(schedule: Schedule) {
   if (!page) missing.push('facebook_page:selected_page_not_found');
   if (page && !page.accessToken) missing.push('facebook_page_access_token');
 
-  const serpstackKey = process.env.SERPSTACK_API_KEY || settings?.serpstackApiKey;
-  if (!serpstackKey) missing.push('serpstackApiKey');
-
   if (schedule.type === 'video') {
     if (!settings?.catboxHash) missing.push('catboxHash');
   } else {
