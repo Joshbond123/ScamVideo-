@@ -3,6 +3,9 @@ import ts from 'typescript';
 
 const filesToCheck = [
   'package.json',
+  'render.yaml',
+  'server/scheduler.ts',
+  'server/services/facebookService.ts',
   'server/services/videoService.ts',
   'src/pages/Settings.tsx',
 ];
@@ -50,7 +53,31 @@ function checkTypeScriptSyntax(fileName, scriptKind) {
   }
 }
 
+checkTypeScriptSyntax('server/scheduler.ts', ts.ScriptKind.TS);
+checkTypeScriptSyntax('server/services/facebookService.ts', ts.ScriptKind.TS);
 checkTypeScriptSyntax('server/services/videoService.ts', ts.ScriptKind.TS);
 checkTypeScriptSyntax('src/pages/Settings.tsx', ts.ScriptKind.TSX);
 
-console.log('[prebuild-check] Merge/syntax checks passed for package.json, videoService.ts, and Settings.tsx.');
+function assertSingleOccurrence(fileName, needle) {
+  const source = fs.readFileSync(fileName, 'utf8');
+  const count = source.split(needle).length - 1;
+  if (count > 1) {
+    console.error(`[prebuild-check] Duplicate block detected in ${fileName}: ${needle}`);
+    process.exit(1);
+  }
+}
+
+assertSingleOccurrence('src/pages/Settings.tsx', 'const providers:');
+assertSingleOccurrence('src/pages/Settings.tsx', 'async function onConnectFacebook()');
+assertSingleOccurrence('server/scheduler.ts', 'async function runVideoPipeline(');
+assertSingleOccurrence('server/scheduler.ts', 'async function runPostPipeline(');
+assertSingleOccurrence('server/services/facebookService.ts', 'export async function verifyTokenAndGetPages(');
+assertSingleOccurrence('server/services/facebookService.ts', 'export async function postPhotoToFacebook(');
+
+assertSingleOccurrence('src/pages/Settings.tsx', 'export default function Settings()');
+assertSingleOccurrence('src/pages/Settings.tsx', 'async function onSavePageEdit()');
+assertSingleOccurrence('src/pages/Settings.tsx', 'async function onSaveCatbox()');
+assertSingleOccurrence('server/scheduler.ts', 'export async function runJob(');
+assertSingleOccurrence('server/services/facebookService.ts', 'export async function postVideoToFacebook(');
+
+console.log('[prebuild-check] Merge/syntax checks passed for package/render + scheduler/facebook/video/settings files.');

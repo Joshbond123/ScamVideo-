@@ -1,6 +1,8 @@
 import express from 'express';
 import path from 'path';
+import crypto from 'crypto';
 import { createServer as createViteServer } from 'vite';
+import axios from 'axios';
 import { initDb, readJson, updateJson, writeJson, PATHS, appendJson } from './server/db';
 import { deleteApiKey, insertApiKey, listApiKeys, patchApiKey } from './server/services/supabaseKeyStore';
 import { startScheduler, runJob, requestSchedulerRefresh } from './server/scheduler';
@@ -8,6 +10,7 @@ import { verifyTokenAndGetPages } from './server/services/facebookService';
 import { ApiKey, Schedule } from './src/types';
 
 async function startServer() {
+  axios.defaults.proxy = false;
   await initDb();
   
   const app = express();
@@ -50,7 +53,7 @@ async function startServer() {
     try {
       const existing = await listApiKeys(provider);
       const newKey: ApiKey = {
-        id: Math.random().toString(36).substr(2, 9),
+        id: crypto.randomUUID(),
         provider,
         name: name?.trim() || `Key #${existing.length + 1}`,
         key,
@@ -84,45 +87,10 @@ async function startServer() {
         status: status === 'inactive' ? 'inactive' : 'active'
       };
       await patchApiKey(provider, id, updatedKey);
-      res.json(updatedKey);
+      return res.json(updatedKey);
     } catch (error: any) {
-      res.status(500).json({ error: error.message });
+      return res.status(500).json({ error: error.message });
     }
-    const existing = await readJson<ApiKey[]>(PATHS.keys[provider]);
-    const newKey: ApiKey = {
-      id: Math.random().toString(36).substr(2, 9),
-      provider,
-      name: name?.trim() || `Key #${existing.length + 1}`,
-      key,
-      successCount: 0,
-      failCount: 0,
-      status: 'active'
-    };
-    await appendJson(PATHS.keys[provider], newKey);
-    res.json(newKey);
-  });
-
-  app.put('/api/keys/:provider/:id', async (req, res) => {
-    const provider = req.params.provider as ApiKey['provider'];
-    const id = req.params.id;
-    const { name, key, status } = req.body;
-    let updatedKey: ApiKey | null = null;
-
-    await updateJson<ApiKey[]>(PATHS.keys[provider], (keys) => keys.map((existing, idx) => {
-      if (existing.id !== id) return existing;
-
-      updatedKey = {
-        ...existing,
-        name: typeof name === 'string' ? (name.trim() || `Key #${idx + 1}`) : existing.name,
-        key: typeof key === 'string' && key.trim() ? key.trim() : existing.key,
-        status: status === 'inactive' ? 'inactive' : 'active'
-      };
-
-      return updatedKey;
-    }));
-
-    if (!updatedKey) return res.status(404).json({ error: 'Key not found' });
-    res.json(updatedKey);
   });
 
   app.delete('/api/keys/:provider/:id', async (req, res) => {
@@ -229,7 +197,7 @@ async function startServer() {
     const type = req.params.type as 'video' | 'post';
     const schedule: Schedule = {
       ...req.body,
-      id: Math.random().toString(36).substr(2, 9),
+      id: crypto.randomUUID(),
       createdAt: new Date().toISOString(),
       status: 'pending'
     };
