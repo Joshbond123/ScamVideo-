@@ -1,6 +1,8 @@
 import express from 'express';
 import path from 'path';
+import crypto from 'crypto';
 import { createServer as createViteServer } from 'vite';
+import axios from 'axios';
 import { initDb, readJson, updateJson, writeJson, PATHS, appendJson } from './server/db';
 import { deleteApiKey, insertApiKey, listApiKeys, patchApiKey } from './server/services/supabaseKeyStore';
 import { startScheduler, runJob, requestSchedulerRefresh } from './server/scheduler';
@@ -8,6 +10,7 @@ import { verifyTokenAndGetPages } from './server/services/facebookService';
 import { ApiKey, Schedule } from './src/types';
 
 async function startServer() {
+  axios.defaults.proxy = false;
   await initDb();
   
   const app = express();
@@ -50,7 +53,7 @@ async function startServer() {
     try {
       const existing = await listApiKeys(provider);
       const newKey: ApiKey = {
-        id: Math.random().toString(36).substr(2, 9),
+        id: crypto.randomUUID(),
         provider,
         name: name?.trim() || `Key #${existing.length + 1}`,
         key,
@@ -194,7 +197,7 @@ async function startServer() {
     const type = req.params.type as 'video' | 'post';
     const schedule: Schedule = {
       ...req.body,
-      id: Math.random().toString(36).substr(2, 9),
+      id: crypto.randomUUID(),
       createdAt: new Date().toISOString(),
       status: 'pending'
     };

@@ -2,13 +2,36 @@ import { ApiKey } from '../../src/types';
 import { listApiKeys, patchApiKey } from './supabaseKeyStore';
 
 const providerRotationOffsets: Record<ApiKey['provider'], number> = {
+
   cerebras: 0,
   unrealspeech: 0,
   'workers-ai': 0,
 };
 
+
+function monthToken(date: Date) {
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+function shouldResetMonthlyUsage(lastUsed?: string) {
+  if (!lastUsed) return false;
+  const d = new Date(lastUsed);
+  if (Number.isNaN(d.getTime())) return true;
+  return monthToken(d) !== monthToken(new Date());
+}
+
+function normalizeMonthlyUsage(key: ApiKey): ApiKey {
+  if (!shouldResetMonthlyUsage(key.lastUsed)) return key;
+  return {
+    ...key,
+    successCount: 0,
+    failCount: 0,
+  };
+}
+
 export async function getKeys(provider: ApiKey['provider']): Promise<ApiKey[]> {
-  return await listApiKeys(provider);
+  const keys = await listApiKeys(provider);
+  return keys.map(normalizeMonthlyUsage);
 }
 
 export async function getActiveKeys(provider: ApiKey['provider']): Promise<ApiKey[]> {
@@ -31,13 +54,16 @@ export async function getNextKey(provider: ApiKey['provider']): Promise<ApiKey |
 
 export async function trackKeyUsage(id: string, provider: ApiKey['provider'], success: boolean) {
   const keys = await getKeys(provider);
-  const key = keys.find((k) => k.id === id);
-  if (!key) return;
+  const rawKey = keys.find((k) => k.id === id);
+  if (!rawKey) return;
+
+  const key = normalizeMonthlyUsage(rawKey);
+  const nowIso = new Date().toISOString();
 
   await patchApiKey(provider, id, {
     successCount: key.successCount + (success ? 1 : 0),
     failCount: key.failCount + (success ? 0 : 1),
-    lastUsed: new Date().toISOString(),
+    lastUsed: nowIso,
     status: key.status,
   });
 }

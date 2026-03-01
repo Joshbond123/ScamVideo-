@@ -12,6 +12,14 @@ function toFacebookPage(page: { id: string; name: string; accessToken: string })
   };
 }
 
+async function getPageOrThrow(pageId: string): Promise<FacebookPage> {
+  const pages = await readJson<FacebookPage[]>(PATHS.facebook.pages);
+  const page = pages.find((p) => p.id === pageId);
+  if (!page) throw new Error('Page not found');
+  if (!page.accessToken) throw new Error(`Page access token missing for page ${pageId}`);
+  return page;
+}
+
 export async function verifyTokenAndGetPages(token: string): Promise<FacebookPage[]> {
   try {
     const response = await axios.get('https://graph.facebook.com/v19.0/me/accounts', {
@@ -56,9 +64,7 @@ export async function verifyTokenAndGetPages(token: string): Promise<FacebookPag
 }
 
 export async function postToFacebook(pageId: string, message: string, link?: string) {
-  const pages = await readJson<FacebookPage[]>(PATHS.facebook.pages);
-  const page = pages.find((p) => p.id === pageId);
-  if (!page) throw new Error('Page not found');
+  const page = await getPageOrThrow(pageId);
 
   const url = `https://graph.facebook.com/v19.0/${pageId}/feed`;
   const params: any = {
@@ -72,9 +78,7 @@ export async function postToFacebook(pageId: string, message: string, link?: str
 }
 
 export async function postPhotoToFacebook(pageId: string, imageUrl: string, caption: string) {
-  const pages = await readJson<FacebookPage[]>(PATHS.facebook.pages);
-  const page = pages.find((p) => p.id === pageId);
-  if (!page) throw new Error('Page not found');
+  const page = await getPageOrThrow(pageId);
 
   const url = `https://graph.facebook.com/v19.0/${pageId}/photos`;
   const response = await axios.post(url, {
@@ -86,14 +90,24 @@ export async function postPhotoToFacebook(pageId: string, imageUrl: string, capt
 }
 
 export async function postVideoToFacebook(pageId: string, videoUrl: string, description: string) {
-  const pages = await readJson<FacebookPage[]>(PATHS.facebook.pages);
-  const page = pages.find((p) => p.id === pageId);
-  if (!page) throw new Error('Page not found');
+  const page = await getPageOrThrow(pageId);
 
   const url = `https://graph.facebook.com/v19.0/${pageId}/videos`;
   const response = await axios.post(url, {
     file_url: videoUrl,
     description,
+    access_token: page.accessToken,
+  });
+  return response.data;
+}
+
+export async function postCommentToFacebook(pageId: string, postId: string, message: string) {
+  const page = await getPageOrThrow(pageId);
+  const idForComment = postId.includes('_') ? postId : `${pageId}_${postId}`;
+
+  const url = `https://graph.facebook.com/v19.0/${idForComment}/comments`;
+  const response = await axios.post(url, {
+    message,
     access_token: page.accessToken,
   });
   return response.data;

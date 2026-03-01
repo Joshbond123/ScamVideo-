@@ -96,6 +96,14 @@ export default function Settings() {
     [keys]
   );
 
+
+  function formatLastUsed(value?: string) {
+    if (!value) return 'Never';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return 'Never';
+    return date.toLocaleString();
+  }
+
   async function onAddKey(provider: ApiKey['provider']) {
     const draft = providerDrafts[provider];
     if (!draft.key.trim()) {
@@ -336,10 +344,19 @@ export default function Settings() {
                 ) : (
                   group.keys.map((k) => (
                     <div key={k.id} className="rounded-lg border p-3 space-y-2">
-                      <div className="flex items-center justify-between">
+                      <div className="flex items-center justify-between gap-2">
                         <span className="font-medium text-sm">{k.name}</span>
                         <Badge variant={k.status === 'active' ? 'success' : 'default'}>{k.status}</Badge>
                       </div>
+                      <div className="grid grid-cols-2 gap-2 text-xs text-slate-600">
+                        <div className="rounded-md bg-emerald-50 px-2 py-1 border border-emerald-100">
+                          Success: <span className="font-semibold">{k.successCount ?? 0}</span>
+                        </div>
+                        <div className="rounded-md bg-rose-50 px-2 py-1 border border-rose-100">
+                          Fail: <span className="font-semibold">{k.failCount ?? 0}</span>
+                        </div>
+                      </div>
+                      <p className="text-xs text-slate-500">Last used: {formatLastUsed(k.lastUsed)}</p>
 
                       {editingKey?.id === k.id ? (
                         <div className="space-y-2">

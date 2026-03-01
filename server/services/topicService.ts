@@ -1,105 +1,99 @@
-import Parser from 'rss-parser';
+import axios from 'axios';
 import { appendJson, PATHS, readJson } from '../db';
 import stringSimilarity from 'string-similarity';
 
-const parser = new Parser();
-
-const BASE_SOURCES = {
+const NICHE_QUERIES: Record<string, string[]> = {
   'Romance & Pig-Butchering Crypto Scams': [
-    'https://www.fbi.gov/rss/news',
-    'https://www.consumer.ftc.gov/blog/rss',
-    'https://krebsonsecurity.com/feed/',
-    'https://www.ic3.gov/Media/News/rss',
-    'https://www.chainalysis.com/blog/rss/',
+    'pig butchering crypto scam latest',
+    'romance crypto scam arrests',
+    'investment whatsapp scam crypto',
+    'telegram romance crypto fraud',
+    'crypto money mule romance fraud',
+    'pig butchering task scam victims',
+    'crypto romance scam headlines',
   ],
   'AI-Driven & Deepfake Crypto Scams': [
-    'https://techcrunch.com/tag/deepfake/feed/',
-    'https://www.theverge.com/rss/ai-artificial-intelligence/index.xml',
-    'https://www.bleepingcomputer.com/feed/',
-    'https://www.wired.com/feed/tag/ai/latest/rss',
-    'https://www.darkreading.com/rss.xml',
-  ],
-  'Crypto Scam Statistics & Big Numbers': [
-    'https://cointelegraph.com/rss/tag/scam',
-    'https://www.coindesk.com/arc/outboundfeeds/rss/',
-    'https://www.chainalysis.com/blog/rss/',
-    'https://feeds.feedburner.com/TheHackersNews',
-    'https://www.cisa.gov/news.xml',
-  ],
-};
-
-const GOOGLE_NEWS_QUERIES: Record<string, string[]> = {
-  'Romance & Pig-Butchering Crypto Scams': [
-    'pig butchering crypto scam',
-    'romance crypto fraud',
-    'whatsapp investment scam',
-    'telegram crypto romance scam',
-    'southeast asia scam compounds',
-    'crypto dating scam arrests',
-    'money mule crypto scam',
-    'fbi pig butchering warning',
-    'online romance fraud crypto',
-    'investment confidence scam crypto',
-  ],
-  'AI-Driven & Deepfake Crypto Scams': [
-    'deepfake crypto scam',
-    'ai voice clone fraud crypto',
+    'deepfake crypto scam latest',
+    'ai voice cloning crypto fraud',
     'deepfake celebrity crypto ad scam',
-    'synthetic identity crypto fraud',
-    'ai phishing crypto wallet',
-    'genai impersonation scam',
-    'deepfake video investment scam',
-    'voice cloning scam losses',
-    'ai social engineering crypto',
-    'deepfake exchange scam',
+    'synthetic identity scam crypto',
+    'ai phishing wallet theft scam',
+    'ai impersonation investment scam',
+    'deepfake finance fraud today',
   ],
   'Crypto Scam Statistics & Big Numbers': [
-    'crypto scam losses report',
-    'crypto fraud statistics',
-    'blockchain scam annual report',
-    'federal crypto crime statistics',
-    'global crypto hacks losses',
-    'romance scam losses 2024 crypto',
-    'investment scam losses report',
-    'pig butchering losses statistics',
-    'fraud trend report cryptocurrency',
-    'chainalysis crypto crime report',
+    'crypto scam losses statistics',
+    'crypto fraud annual report',
+    'chainalysis crypto crime report scam',
+    'crypto hacks losses billions',
+    'federal crypto fraud numbers',
+    'crypto investment scam totals',
+    'global crypto fraud trends',
   ],
 };
 
-function buildGoogleNewsRssUrls(niche: string) {
-  const queries = GOOGLE_NEWS_QUERIES[niche] || [];
-  return queries.map((q) =>
-    `https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-US&gl=US&ceid=US:en`
-  );
+function dedupeTopics(topics: string[]) {
+  return Array.from(new Set(topics.map((t) => t.trim()))).filter((t) => t.length > 12);
 }
 
-export async function discoverTopics(niche: string): Promise<string[]> {
-  const feeds = [...(BASE_SOURCES[niche as keyof typeof BASE_SOURCES] || []), ...buildGoogleNewsRssUrls(niche)];
-  const topics: string[] = [];
+function getSerpstackKey(settings: any) {
+  const fromSettings = typeof settings?.serpstackApiKey === 'string' ? settings.serpstackApiKey.trim() : '';
+  return process.env.SERPSTACK_API_KEY || fromSettings;
+}
 
-  await Promise.all(
-    feeds.map(async (url) => {
-      try {
-        const feed = await parser.parseURL(url);
-        const recent = (feed.items || [])
-          .slice(0, 8)
-          .map((item) => item.title || '')
-          .filter(Boolean);
-        topics.push(...recent);
-      } catch (error) {
-        console.error(`Error fetching feed ${url}:`, error);
+export async function discoverTopics(niche: string): Promise<{ topics: string[]; source: string }> {
+  const settings = await readJson<any>(PATHS.settings);
+  const accessKey = getSerpstackKey(settings);
+  if (!accessKey) {
+    throw new Error('Serpstack API key missing in settings.serpstackApiKey or SERPSTACK_API_KEY');
+  }
+
+  const queries = NICHE_QUERIES[niche] || [];
+  const titles: string[] = [];
+
+  for (const query of queries) {
+    try {
+      const response = await axios.get('https://api.serpstack.com/search', {
+        params: {
+          access_key: accessKey,
+          query,
+          type: 'news',
+          num: 15,
+          gl: 'us',
+          hl: 'en',
+        },
+        timeout: 20_000,
+      });
+
+      const payload = response.data || {};
+      const items = [
+        ...(Array.isArray(payload.news_results) ? payload.news_results : []),
+        ...(Array.isArray(payload.news) ? payload.news : []),
+        ...(Array.isArray(payload.organic_results) ? payload.organic_results : []),
+      ];
+
+      for (const item of items) {
+        const title = typeof item?.title === 'string' ? item.title.trim() : '';
+        if (title) titles.push(title);
       }
-    })
-  );
+    } catch (error: any) {
+      console.warn('Serpstack topic fetch failed for query:', query, error?.response?.data || error?.message || error);
+    }
+  }
 
-  const deduped = Array.from(new Set(topics.map((t) => t.trim()))).filter((t) => t.length > 12);
-  return deduped.slice(0, 50);
+  const topics = dedupeTopics(titles).slice(0, 50);
+  return { topics, source: 'serpstack' };
 }
 
 export async function getUniqueTopic(niche: string, candidates: string[]): Promise<string | null> {
   const history = await readJson<string[]>(PATHS.topics.history);
-  const normalizedHistory = history.map((topic) => topic.toLowerCase());
+
+  const normalizedHistory = history
+    .map((entry) => {
+      const parts = entry.split('::');
+      return (parts[parts.length - 1] || entry).trim().toLowerCase();
+    })
+    .filter(Boolean);
 
   for (const candidate of candidates) {
     const normalizedCandidate = candidate.toLowerCase();

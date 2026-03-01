@@ -1,164 +1,157 @@
-import { createClient } from '@supabase/supabase-js';
+import axios from 'axios';
 import { ApiKey } from '../../src/types';
-import { PATHS, readJson, updateJson } from '../db';
 
 type ApiKeyRow = {
   id: string;
-  provider: ApiKey['provider'];
-  name: string;
-  key: string;
-  last_used: string | null;
-  success_count: number;
-  fail_count: number;
-  status: 'active' | 'inactive';
+  key_type: ApiKey['provider'];
+  key_name: string | null;
+  encrypted_key: string;
+  metadata: Record<string, any> | null;
+  created_at?: string;
+  updated_at?: string;
 };
 
-let supabase: ReturnType<typeof createClient> | null = null;
-let supabaseUnavailable = false;
-
-function getSupabase() {
-  if (supabaseUnavailable) return null;
-  if (supabase) return supabase;
-
+function getSupabaseConfigOrThrow() {
   const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
   if (!supabaseUrl || !serviceKey) {
-    return null;
+    throw new Error('Supabase api_keys storage requires SUPABASE_URL/NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY');
   }
 
-  supabase = createClient(supabaseUrl, serviceKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
+  return { supabaseUrl, serviceKey };
+}
 
-  return supabase;
+function getSupabaseRestClient() {
+  const { supabaseUrl, serviceKey } = getSupabaseConfigOrThrow();
+  return axios.create({
+    baseURL: `${supabaseUrl}/rest/v1`,
+    headers: {
+      apikey: serviceKey,
+      Authorization: `Bearer ${serviceKey}`,
+      'Content-Type': 'application/json',
+    },
+    timeout: 30_000,
+    proxy: false,
+  });
 }
 
 function rowToApiKey(row: ApiKeyRow): ApiKey {
+  const metadata = row.metadata || {};
   return {
     id: row.id,
-    provider: row.provider,
-    name: row.name,
-    key: row.key,
-    lastUsed: row.last_used ?? undefined,
-    successCount: row.success_count,
-    failCount: row.fail_count,
-    status: row.status,
+    provider: row.key_type,
+    name: row.key_name || `Key ${row.id.slice(0, 8)}`,
+    key: row.encrypted_key,
+    lastUsed: typeof metadata.lastUsed === 'string' ? metadata.lastUsed : undefined,
+    successCount: Number(metadata.successCount || 0),
+    failCount: Number(metadata.failCount || 0),
+    status: metadata.status === 'inactive' ? 'inactive' : 'active',
   };
 }
 
-function providerPath(provider: ApiKey['provider']) {
-  return PATHS.keys[provider];
-}
+async function getRow(provider: ApiKey['provider'], id: string): Promise<ApiKeyRow | null> {
+  const client = getSupabaseRestClient();
+  const response = await client.get('/api_keys', {
+    params: {
+      key_type: `eq.${provider}`,
+      id: `eq.${id}`,
+      select: 'id,key_type,key_name,encrypted_key,metadata,created_at,updated_at',
+      limit: 1,
+    },
+  });
 
-async function listFromFile(provider: ApiKey['provider']): Promise<ApiKey[]> {
-  return await readJson<ApiKey[]>(providerPath(provider));
-}
-
-async function withSupabaseFallback<T>(operation: (client: ReturnType<typeof createClient>) => Promise<T>): Promise<T | null> {
-  const client = getSupabase();
-  if (!client) return null;
-
-  try {
-    return await operation(client);
-  } catch (error: any) {
-    supabaseUnavailable = true;
-    console.warn('Supabase api_keys operation failed, falling back to file storage:', error?.message || error);
-    return null;
-  }
+  const rows = Array.isArray(response.data) ? response.data : [];
+  return (rows[0] as ApiKeyRow | undefined) || null;
 }
 
 export async function listApiKeys(provider: ApiKey['provider']): Promise<ApiKey[]> {
-  const fromSupabase = await withSupabaseFallback(async (client) => {
-    const { data, error } = await (client as any)
-      .from('api_keys')
-      .select('*')
-      .eq('provider', provider)
-      .order('created_at', { ascending: false });
-
-    if (error) throw error;
-    return (data || []).map((r: ApiKeyRow) => rowToApiKey(r));
+  const client = getSupabaseRestClient();
+  const response = await client.get('/api_keys', {
+    params: {
+      key_type: `eq.${provider}`,
+      select: 'id,key_type,key_name,encrypted_key,metadata,created_at,updated_at',
+      order: 'created_at.desc',
+    },
   });
 
-  if (fromSupabase !== null) return fromSupabase;
-  return await listFromFile(provider);
+  const rows = Array.isArray(response.data) ? response.data : [];
+  return rows.map((r: ApiKeyRow) => rowToApiKey(r));
 }
 
 export async function insertApiKey(key: ApiKey): Promise<ApiKey> {
-  const fromSupabase = await withSupabaseFallback(async (client) => {
-    const { data, error } = await (client as any)
-      .from('api_keys')
-      .insert({
+  const client = getSupabaseRestClient();
+  const metadata = {
+    successCount: key.successCount,
+    failCount: key.failCount,
+    status: key.status,
+    lastUsed: key.lastUsed ?? null,
+  };
+
+  const response = await client.post(
+    '/api_keys',
+    [
+      {
         id: key.id,
-        provider: key.provider,
-        name: key.name,
-        key: key.key,
-        success_count: key.successCount,
-        fail_count: key.failCount,
-        last_used: key.lastUsed ?? null,
-        status: key.status,
-      })
-      .select('*')
-      .single();
+        key_type: key.provider,
+        key_name: key.name,
+        encrypted_key: key.key,
+        metadata,
+      },
+    ],
+    {
+      headers: {
+        Prefer: 'return=representation',
+      },
+    }
+  );
 
-    if (error) throw error;
-    return rowToApiKey(data as ApiKeyRow);
-  });
-
-  if (fromSupabase) return fromSupabase;
-
-  await updateJson<ApiKey[]>(providerPath(key.provider), (existing) => [key, ...existing]);
-  return key;
+  const row = (Array.isArray(response.data) ? response.data[0] : null) as ApiKeyRow | null;
+  if (!row) throw new Error(`Failed to insert ${key.provider} key in Supabase`);
+  return rowToApiKey(row);
 }
 
 export async function patchApiKey(provider: ApiKey['provider'], id: string, values: Partial<ApiKey>): Promise<ApiKey | null> {
-  const fromSupabase = await withSupabaseFallback(async (client) => {
-    const payload: Record<string, unknown> = {};
-    if (values.name !== undefined) payload.name = values.name;
-    if (values.key !== undefined) payload.key = values.key;
-    if (values.status !== undefined) payload.status = values.status;
-    if (values.successCount !== undefined) payload.success_count = values.successCount;
-    if (values.failCount !== undefined) payload.fail_count = values.failCount;
-    if (values.lastUsed !== undefined) payload.last_used = values.lastUsed;
+  const current = await getRow(provider, id);
+  if (!current) return null;
 
-    const { data, error } = await (client as any)
-      .from('api_keys')
-      .update(payload)
-      .eq('provider', provider)
-      .eq('id', id)
-      .select('*')
-      .maybeSingle();
+  const metadata = {
+    ...(current.metadata || {}),
+    ...(values.successCount !== undefined ? { successCount: values.successCount } : {}),
+    ...(values.failCount !== undefined ? { failCount: values.failCount } : {}),
+    ...(values.status !== undefined ? { status: values.status } : {}),
+    ...(values.lastUsed !== undefined ? { lastUsed: values.lastUsed } : {}),
+  };
 
-    if (error) throw error;
-    return data ? rowToApiKey(data as ApiKeyRow) : null;
+  const payload: Record<string, unknown> = {
+    metadata,
+  };
+
+  if (values.name !== undefined) payload.key_name = values.name;
+  if (values.key !== undefined) payload.encrypted_key = values.key;
+
+  const client = getSupabaseRestClient();
+  const response = await client.patch('/api_keys', payload, {
+    params: {
+      key_type: `eq.${provider}`,
+      id: `eq.${id}`,
+      select: 'id,key_type,key_name,encrypted_key,metadata,created_at,updated_at',
+    },
+    headers: {
+      Prefer: 'return=representation',
+    },
   });
 
-  if (fromSupabase !== null) return fromSupabase;
-
-  let updated: ApiKey | null = null;
-  await updateJson<ApiKey[]>(providerPath(provider), (existing) =>
-    existing.map((key) => {
-      if (key.id !== id) return key;
-      updated = {
-        ...key,
-        ...values,
-        provider,
-      };
-      return updated;
-    })
-  );
-
-  return updated;
+  const row = (Array.isArray(response.data) ? response.data[0] : null) as ApiKeyRow | null;
+  return row ? rowToApiKey(row) : null;
 }
 
 export async function deleteApiKey(provider: ApiKey['provider'], id: string): Promise<void> {
-  const fromSupabase = await withSupabaseFallback(async (client) => {
-    const { error } = await (client as any).from('api_keys').delete().eq('provider', provider).eq('id', id);
-    if (error) throw error;
-    return true;
+  const client = getSupabaseRestClient();
+  await client.delete('/api_keys', {
+    params: {
+      key_type: `eq.${provider}`,
+      id: `eq.${id}`,
+    },
   });
-
-  if (fromSupabase) return;
-
-  await updateJson<ApiKey[]>(providerPath(provider), (existing) => existing.filter((key) => key.id !== id));
 }
