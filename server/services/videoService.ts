@@ -58,27 +58,123 @@ export async function generateFacebookComment(title: string, caption: string, to
   return `${base}\n\n${appendUrl}`;
 }
 
-export async function generateVoiceover(text: string, jobId: string) {
-  return withKeyFailover('unrealspeech', async (key) => {
-    const response = await axios.post(
-      'https://api.unrealspeech.com/stream',
-      {
-        Text: text,
-        VoiceId: 'Will',
-        Bitrate: '192k',
-        Speed: '0',
-        Pitch: '1.0',
-      },
-      {
-        headers: { Authorization: `Bearer ${key.key}` },
-        responseType: 'arraybuffer',
-      }
-    );
 
-    const filePath = path.join(process.cwd(), 'database/assets/audio', `${jobId}.mp3`);
-    await fs.writeFile(filePath, response.data);
-    return filePath;
+function chunkTextForTts(text: string, maxLen = 180) {
+  const words = text.split(/\s+/).filter(Boolean);
+  const chunks: string[] = [];
+  let current = '';
+
+  for (const word of words) {
+    const next = current ? `${current} ${word}` : word;
+    if (next.length <= maxLen) {
+      current = next;
+      continue;
+    }
+
+    if (current) chunks.push(current);
+    current = word;
+  }
+
+  if (current) chunks.push(current);
+  return chunks.length ? chunks : [text.slice(0, maxLen)];
+}
+
+async function concatAudioFiles(inputPaths: string[], outputPath: string) {
+  const listPath = outputPath.replace(/\.mp3$/, '_parts.txt');
+  const listContent = inputPaths.map((p) => `file '${p}'`).join('\\n');
+  await fs.writeFile(listPath, listContent, 'utf8');
+
+  await new Promise<void>((resolve, reject) => {
+    ffmpeg()
+      .input(listPath)
+      .inputOptions(['-f concat', '-safe 0'])
+      .outputOptions(['-c copy'])
+      .on('end', () => resolve())
+      .on('error', (err) => reject(err))
+      .save(outputPath);
   });
+
+  await fs.remove(listPath);
+}
+
+async function generateVoiceoverWithGoogleTts(text: string, jobId: string) {
+  const outputPath = path.join(process.cwd(), 'database/assets/audio', `${jobId}.mp3`);
+  const partsDir = path.join(process.cwd(), 'database/assets/audio', `${jobId}_parts`);
+  await fs.ensureDir(partsDir);
+
+  const chunks = chunkTextForTts(text);
+  const partFiles: string[] = [];
+
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    const response = await axios.get('https://translate.google.com/translate_tts', {
+      params: {
+        ie: 'UTF-8',
+        client: 'tw-ob',
+        tl: 'en',
+        q: chunk,
+      },
+      responseType: 'arraybuffer',
+      headers: {
+        'User-Agent': 'Mozilla/5.0',
+      },
+      timeout: 30_000,
+    });
+
+    const partPath = path.join(partsDir, `part_${String(i).padStart(3, '0')}.mp3`);
+    await fs.writeFile(partPath, response.data);
+    partFiles.push(partPath);
+  }
+
+  if (partFiles.length === 1) {
+    await fs.move(partFiles[0], outputPath, { overwrite: true });
+  } else {
+    await concatAudioFiles(partFiles, outputPath);
+  }
+
+  await fs.remove(partsDir);
+  return outputPath;
+}
+
+export async function generateVoiceover(text: string, jobId: string) {
+  const filePath = path.join(process.cwd(), 'database/assets/audio', `${jobId}.mp3`);
+
+  try {
+    return await withKeyFailover('unrealspeech', async (key) => {
+      const endpoints = ['https://api.unrealspeech.com/stream', 'https://api.v8.unrealspeech.com/stream'];
+      let lastError: unknown;
+
+      for (const endpoint of endpoints) {
+        try {
+          const response = await axios.post(
+            endpoint,
+            {
+              Text: text,
+              VoiceId: 'Will',
+              Bitrate: '192k',
+              Speed: '0',
+              Pitch: '1.0',
+            },
+            {
+              headers: { Authorization: `Bearer ${key.key}` },
+              responseType: 'arraybuffer',
+              timeout: 45_000,
+            }
+          );
+
+          await fs.writeFile(filePath, response.data);
+          return filePath;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+
+      throw lastError instanceof Error ? lastError : new Error('UnrealSpeech request failed');
+    });
+  } catch (error) {
+    console.warn('UnrealSpeech failed; falling back to free Google TTS:', error);
+    return generateVoiceoverWithGoogleTts(text, jobId);
+  }
 }
 
 export async function generateImage(prompt: string, jobId: string, sceneIdx: number) {

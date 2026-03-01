@@ -32,7 +32,6 @@ function getSupabaseRestClient() {
       'Content-Type': 'application/json',
     },
     timeout: 30_000,
-    proxy: false,
   });
 }
 
