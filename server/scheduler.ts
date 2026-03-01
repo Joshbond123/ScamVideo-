@@ -109,13 +109,20 @@ async function validateRequiredConfig(schedule: Schedule) {
   }
 }
 
-async function setScheduleStatus(id: string, type: 'video' | 'post', status: any) {
+async function updateSchedule(id: string, type: 'video' | 'post', patch: Partial<Schedule>) {
   const path = type === 'video' ? PATHS.schedules.video : PATHS.schedules.post;
   await updateJson<Schedule[]>(path, (data) => {
-    const idx = data.findIndex((s) => s.id === id);
-    if (idx !== -1) data[idx].status = status;
-    return data;
+    const list = Array.isArray(data) ? data : [];
+    const idx = list.findIndex((s) => s.id === id);
+    if (idx !== -1) {
+      list[idx] = { ...list[idx], ...patch };
+    }
+    return list;
   });
+}
+
+async function setScheduleStatus(id: string, type: 'video' | 'post', status: Schedule['status'], patch: Partial<Schedule> = {}) {
+  await updateSchedule(id, type, { ...patch, status });
 }
 
 async function processDueSchedules() {
@@ -177,7 +184,7 @@ export async function startScheduler() {
 
 export async function runJob(schedule: Schedule) {
   await logEvent(schedule.type, 'info', `job_start id=${schedule.id} scheduledAt=${schedule.scheduledAt}`, schedule.niche);
-  await setScheduleStatus(schedule.id, schedule.type, 'generating');
+  await setScheduleStatus(schedule.id, schedule.type, 'generating', { startedAt: new Date().toISOString(), errorMessage: '' });
 
   try {
     await withStage(schedule, 'validate_required_config', async () => validateRequiredConfig(schedule));
@@ -194,6 +201,7 @@ export async function runJob(schedule: Schedule) {
     if (!topic) throw new Error('No unique topics found');
 
     await logEvent(schedule.type, 'info', `selected_topic=${topic}`, schedule.niche);
+    await updateSchedule(schedule.id, schedule.type, { lastTopic: topic });
 
     if (schedule.type === 'video') {
       await runVideoPipeline(schedule, topic);
@@ -201,7 +209,7 @@ export async function runJob(schedule: Schedule) {
       await runPostPipeline(schedule, topic);
     }
 
-    await setScheduleStatus(schedule.id, schedule.type, 'posted');
+    await setScheduleStatus(schedule.id, schedule.type, 'posted', { publishedAt: new Date().toISOString(), failedAt: undefined, errorMessage: '' });
     await logEvent(schedule.type, 'success', `job_success id=${schedule.id}`, schedule.niche);
 
     if (schedule.isDaily) {
@@ -225,7 +233,7 @@ export async function runJob(schedule: Schedule) {
     }
   } catch (error: any) {
     const e = normalizeError(error);
-    await setScheduleStatus(schedule.id, schedule.type, 'failed');
+    await setScheduleStatus(schedule.id, schedule.type, 'failed', { failedAt: new Date().toISOString(), errorMessage: e.message });
     await logEvent(
       schedule.type,
       'error',
@@ -273,6 +281,8 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
     const comment = await generateFacebookComment(scriptData.title, scriptData.caption, topic, settings?.facebookCommentUrl || '');
     await postCommentToFacebook(schedule.pageId, fbResult.id, comment);
 
+    await updateSchedule(schedule.id, schedule.type, { generatedTitle: scriptData.title });
+
     await updateJson(PATHS.content.published_videos, (data: any[]) => [
       {
         id: jobId,
@@ -308,6 +318,8 @@ async function runPostPipeline(schedule: Schedule, topic: string) {
 
   await withStage(schedule, 'post_publish_facebook', async () => {
     const fbResult = await postPhotoToFacebook(schedule.pageId, imageUrl, `${scriptData.caption}\n\n${scriptData.hashtags}`);
+
+    await updateSchedule(schedule.id, schedule.type, { generatedTitle: scriptData.title });
 
     await updateJson(PATHS.content.published_posts, (data: any[]) => [
       {

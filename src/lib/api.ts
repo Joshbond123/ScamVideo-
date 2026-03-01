@@ -22,11 +22,17 @@ export const api = {
       client.get('/content/published-posts')
     ]);
 
+    const startOfWindow = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const publishedThisWeek = [...publishedV.data, ...publishedP.data].filter((item: any) => {
+      const ts = new Date(item?.postedAt || item?.publishedAt || 0).getTime();
+      return Number.isFinite(ts) && ts >= startOfWindow;
+    }).length;
+
     return {
       connectedPages: pages.data.length,
       scheduledVideos: videos.data.filter((s: any) => s.status === 'pending').length,
       scheduledPosts: posts.data.filter((s: any) => s.status === 'pending').length,
-      publishedThisWeek: publishedV.data.length + publishedP.data.length
+      publishedThisWeek,
     };
   },
 
@@ -119,6 +125,11 @@ export const api = {
   getLogs: async (): Promise<LogEntry[]> => {
     const res = await client.get('/logs');
     return res.data;
+  },
+
+  getRecentSchedules: async (limit = 8): Promise<Schedule[]> => {
+    const res = await client.get('/schedules/recent', { params: { limit } });
+    return Array.isArray(res.data) ? res.data : [];
   },
 
   runJobManual: async (id: string, type: 'video' | 'post'): Promise<void> => {
