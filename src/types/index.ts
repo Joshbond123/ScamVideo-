@@ -11,6 +11,13 @@ export interface Schedule {
   isDaily: boolean;
   status: Status;
   createdAt: string;
+  startedAt?: string;
+  publishedAt?: string;
+  failedAt?: string;
+  errorMessage?: string;
+  lastTopic?: string;
+  generatedTitle?: string;
+  pageName?: string;
 }
 
 export interface PublishedItem {

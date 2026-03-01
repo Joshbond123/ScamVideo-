@@ -3,14 +3,53 @@ import path from 'path';
 import crypto from 'crypto';
 import { createServer as createViteServer } from 'vite';
 import axios from 'axios';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import { initDb, readJson, updateJson, writeJson, PATHS, appendJson } from './server/db';
 import { deleteApiKey, insertApiKey, listApiKeys, patchApiKey } from './server/services/supabaseKeyStore';
 import { startScheduler, runJob, requestSchedulerRefresh } from './server/scheduler';
 import { verifyTokenAndGetPages } from './server/services/facebookService';
 import { ApiKey, Schedule } from './src/types';
 
-async function startServer() {
+function parseScheduleIdFromMessage(message: string): string | null {
+  const match = /id=([a-zA-Z0-9-]+)/.exec(message || '');
+  return match?.[1] || null;
+}
+
+function buildScheduleDiagnostics(logs: any[]) {
+  const byId: Record<string, { errorMessage?: string; publishedAt?: string }> = {};
+
+  for (const log of Array.isArray(logs) ? logs : []) {
+    if (typeof log?.message !== 'string') continue;
+    const scheduleId = parseScheduleIdFromMessage(log.message);
+    if (!scheduleId) continue;
+
+    byId[scheduleId] = byId[scheduleId] || {};
+
+    if (log.message.includes('job_failed') && !byId[scheduleId].errorMessage) {
+      byId[scheduleId].errorMessage = log.message;
+    }
+
+    if (log.message.includes('job_success') && !byId[scheduleId].publishedAt) {
+      byId[scheduleId].publishedAt = log.timestamp;
+    }
+  }
+
+  return byId;
+}
+
+
+
+function configureAxiosProxySupport() {
+  const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
+  if (!proxyUrl) return;
+
+  const agent = new HttpsProxyAgent(proxyUrl);
+  axios.defaults.httpsAgent = agent;
   axios.defaults.proxy = false;
+}
+
+async function startServer() {
+  configureAxiosProxySupport();
   await initDb();
   
   const app = express();
@@ -188,6 +227,37 @@ async function startServer() {
   });
 
   // Scheduling
+
+  app.get('/api/schedules/recent', async (req, res) => {
+    const limit = Math.max(1, Math.min(50, Number(req.query.limit || 8)));
+
+    const [videoSchedules, postSchedules, pages, logs] = await Promise.all([
+      readJson<Schedule[]>(PATHS.schedules.video),
+      readJson<Schedule[]>(PATHS.schedules.post),
+      readJson<any[]>(PATHS.facebook.pages),
+      readJson<any[]>(PATHS.logs),
+    ]);
+
+    const pageMap = new Map((Array.isArray(pages) ? pages : []).map((p) => [p.id, p]));
+    const diagnostics = buildScheduleDiagnostics(Array.isArray(logs) ? logs : []);
+
+    const merged = [...(Array.isArray(videoSchedules) ? videoSchedules : []), ...(Array.isArray(postSchedules) ? postSchedules : [])]
+      .map((schedule) => {
+        const page = pageMap.get(schedule.pageId);
+        const d = diagnostics[schedule.id] || {};
+        return {
+          ...schedule,
+          pageName: schedule.pageName || page?.name || 'Unknown Page',
+          publishedAt: schedule.publishedAt || d.publishedAt,
+          errorMessage: schedule.errorMessage || d.errorMessage,
+        };
+      })
+      .sort((a, b) => new Date(b.createdAt || b.scheduledAt).getTime() - new Date(a.createdAt || a.scheduledAt).getTime())
+      .slice(0, limit);
+
+    res.json(merged);
+  });
+
   app.get('/api/schedules/:type', async (req, res) => {
     const type = req.params.type as 'video' | 'post';
     res.json(await readJson(PATHS.schedules[type]));

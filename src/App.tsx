@@ -5,7 +5,7 @@ import ScheduleVideo from './pages/ScheduleVideo';
 import SchedulePost from './pages/SchedulePost';
 import Published from './pages/Published';
 import Settings from './pages/Settings';
-import Logs from './pages/Logs';
+import RecentSchedules from './pages/RecentSchedules';
 
 export default function App() {
   return (
@@ -16,7 +16,7 @@ export default function App() {
         <Route path="/schedule/post" component={SchedulePost} />
         <Route path="/content/published" component={Published} />
         <Route path="/settings" component={Settings} />
-        <Route path="/logs" component={Logs} />
+        <Route path="/recent-schedules" component={RecentSchedules} />
         
         {/* Default route */}
         <Route path="/">
