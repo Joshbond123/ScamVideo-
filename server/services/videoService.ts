@@ -7,6 +7,7 @@ import axios from 'axios';
 import FormData from 'form-data';
 import { resolveCloudflareAccountId, withKeyFailover } from './keyService';
 import { readJson, PATHS } from '../db';
+import { deleteSupabaseAssets, pruneSupabaseTempAssets, renderVideoViaSupabaseFunction } from './supabaseStorage';
 
 type GeneratedScript = {
   title: string;
@@ -466,6 +467,15 @@ async function buildSubtitleFilters(lines: string[], totalDurationSec: number, j
 export async function assembleVideo(jobId: string, audioPath: string, imagePaths: string[], subtitleLines: string[]) {
   const outputPath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.mp4`);
 
+  try {
+    const remote = await renderVideoViaSupabaseFunction({ jobId, audioPath, imagePaths, subtitleLines });
+    if (remote?.localOutput) {
+      return remote.localOutput;
+    }
+  } catch (error) {
+    console.warn(`[video:${jobId}] Supabase render function failed, using local ffmpeg fallback:`, error);
+  }
+
   const totalDurationSec = await getAudioDurationSec(audioPath);
   const baseFilters = [
     `concat=n=${imagePaths.length}:v=1:a=0[v]`,
@@ -515,6 +525,22 @@ export async function cleanupJobAssets(jobId: string) {
   const subtitlePath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.ass`);
 
   await Promise.all([fs.remove(audioPath), fs.remove(imageDir), fs.remove(videoPath), fs.remove(subtitlePath)]);
+
+  try {
+    await deleteSupabaseAssets([
+      `jobs/${jobId}/audio.mp3`,
+      `jobs/${jobId}/render.mp4`,
+      ...Array.from({ length: 16 }).map((_, idx) => `jobs/${jobId}/scene_${idx}.png`),
+    ]);
+  } catch (error) {
+    console.warn(`[cleanup:${jobId}] Supabase storage cleanup skipped:`, error);
+  }
+
+  try {
+    await pruneSupabaseTempAssets('jobs/', 24, 1_500_000_000);
+  } catch (error) {
+    console.warn(`[cleanup:${jobId}] Supabase pruning skipped:`, error);
+  }
 }
 
 export async function cleanupPostImageAsset(imagePath: string) {

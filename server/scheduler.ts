@@ -19,7 +19,8 @@ import { getActiveKeys, resolveCloudflareAccountId } from './services/keyService
 
 const SCHEDULER_TICK_MS = 15_000;
 const STALE_GENERATING_MS = 90 * 60 * 1000;
-let schedulerInterval: NodeJS.Timeout | null = null;
+const MAX_SLEEP_MS = 15 * 60 * 1000;
+let schedulerTimer: NodeJS.Timeout | null = null;
 let isTickRunning = false;
 
 function getScheduleSortTime(schedule: Schedule) {
@@ -214,27 +215,64 @@ async function processDueSchedules() {
   }
 }
 
+async function computeNextWakeDelayMs(): Promise<number | null> {
+  const [videoSchedules, postSchedules] = await Promise.all([
+    readJson<Schedule[]>(PATHS.schedules.video),
+    readJson<Schedule[]>(PATHS.schedules.post),
+  ]);
+
+  const pending = [...videoSchedules, ...postSchedules].filter((s) => s.status === 'pending');
+  if (!pending.length) return null;
+
+  const now = Date.now();
+  const nextTs = Math.min(...pending.map((s) => new Date(s.scheduledAt).getTime()));
+  if (!Number.isFinite(nextTs)) return SCHEDULER_TICK_MS;
+
+  const delay = Math.max(0, nextTs - now);
+  return Math.min(Math.max(delay, 1000), MAX_SLEEP_MS);
+}
+
+async function scheduleNextWake() {
+  if (schedulerTimer) {
+    clearTimeout(schedulerTimer);
+    schedulerTimer = null;
+  }
+
+  const delayMs = await computeNextWakeDelayMs();
+  if (delayMs == null) {
+    await logEvent('system', 'info', 'scheduler_sleep:no_pending_jobs');
+    return;
+  }
+
+  schedulerTimer = setTimeout(() => {
+    processDueSchedules()
+      .then(() => scheduleNextWake())
+      .catch(async (error) => {
+        console.error('Scheduler wake failed:', error);
+        await logEvent('system', 'error', `scheduler_wake_failed:${error?.message || error}`);
+        schedulerTimer = setTimeout(() => {
+          processDueSchedules().then(() => scheduleNextWake()).catch(console.error);
+        }, SCHEDULER_TICK_MS);
+      });
+  }, delayMs);
+}
+
 export function requestSchedulerRefresh() {
-  processDueSchedules().catch((error) => {
+  processDueSchedules().then(() => scheduleNextWake()).catch((error) => {
     console.error('Failed to refresh scheduler:', error);
   });
 }
 
 export async function startScheduler() {
   console.log('Scheduler starting...');
-  if (schedulerInterval) clearInterval(schedulerInterval);
+  if (schedulerTimer) clearTimeout(schedulerTimer);
 
   try {
     await processDueSchedules();
+    await scheduleNextWake();
   } catch (error) {
     console.error('Scheduler initial tick failed:', error);
   }
-
-  schedulerInterval = setInterval(() => {
-    processDueSchedules().catch((error) => {
-      console.error('Scheduler interval tick failed:', error);
-    });
-  }, SCHEDULER_TICK_MS);
 }
 
 export async function runJob(schedule: Schedule) {
@@ -307,70 +345,72 @@ export async function runJob(schedule: Schedule) {
 
 async function runVideoPipeline(schedule: Schedule, topic: string) {
   const jobId = schedule.id;
-  const scriptData = await withStage(schedule, 'video_script_generation', async () => generateScript(schedule.niche, topic));
-  await updateSchedule(schedule.id, schedule.type, { generatedTitle: scriptData?.title || '' });
+  try {
+    const scriptData = await withStage(schedule, 'video_script_generation', async () => generateScript(schedule.niche, topic));
+    await updateSchedule(schedule.id, schedule.type, { generatedTitle: scriptData?.title || '' });
 
-  if (!Array.isArray(scriptData?.scenes) || scriptData.scenes.length === 0) {
-    throw new Error('Generated video script has no scenes');
-  }
-
-  const stitchedScript = [scriptData.hook, scriptData.script, scriptData.preCtaScene?.text, scriptData.cta].filter(Boolean).join(' ');
-  const audioPath = await withStage(schedule, 'video_voiceover_generation', async () => generateVoiceover(stitchedScript, jobId));
-
-  const scenePlan = [...scriptData.scenes, scriptData.preCtaScene, { text: scriptData.cta, imagePrompt: `Topic-aware call to action visual for ${topic}, dynamic social media ending frame, no text, no logo, vertical 9:16` }].filter(Boolean);
-  const imagePaths: string[] = [];
-  await withStage(schedule, 'video_scene_image_generation', async () => {
-    for (let i = 0; i < scenePlan.length; i++) {
-      const prompt = `${scenePlan[i].imagePrompt}. Vertical 9:16 composition. No text, words, watermarks, logos.`;
-      const imgPath = await generateImage(prompt, jobId, i);
-      imagePaths.push(imgPath);
+    if (!Array.isArray(scriptData?.scenes) || scriptData.scenes.length === 0) {
+      throw new Error('Generated video script has no scenes');
     }
-  });
 
-  const videoPath = await withStage(schedule, 'video_render_ffmpeg', async () =>
-    assembleVideo(
-      jobId,
-      audioPath,
-      imagePaths,
-      scenePlan.map((s: any) => String(s?.text || '').trim()).filter(Boolean)
-    )
-  );
+    const stitchedScript = [scriptData.hook, scriptData.script, scriptData.preCtaScene?.text, scriptData.cta].filter(Boolean).join(' ');
+    const audioPath = await withStage(schedule, 'video_voiceover_generation', async () => generateVoiceover(stitchedScript, jobId));
 
-  const videoUrl = await withStage(schedule, 'video_host_catbox', async () => uploadToCatbox(videoPath));
-
-  await withStage(schedule, 'video_publish_facebook', async () => {
-    const description = `${scriptData.caption}\n\n${scriptData.hashtags}`;
-    const fbResult = await postVideoToFacebook(schedule.pageId, videoUrl, description);
-    const publishTargetId = String((fbResult as any)?.post_id || (fbResult as any)?.id || '');
-
-    const settings = await readJson<any>(PATHS.settings);
-    const comment = await generateFacebookComment(scriptData.title, scriptData.caption, topic, settings?.facebookCommentUrl || '');
-
-    if (publishTargetId) {
-      try {
-        await postCommentToFacebook(schedule.pageId, publishTargetId, comment);
-      } catch (error: any) {
-        await logEvent(schedule.type, 'error', `comment_publish_failed id=${schedule.id} message=${error?.message || error}`, schedule.niche);
+    const scenePlan = [...scriptData.scenes, scriptData.preCtaScene, { text: scriptData.cta, imagePrompt: `Topic-aware call to action visual for ${topic}, dynamic social media ending frame, no text, no logo, vertical 9:16` }].filter(Boolean);
+    const imagePaths: string[] = [];
+    await withStage(schedule, 'video_scene_image_generation', async () => {
+      for (let i = 0; i < scenePlan.length; i++) {
+        const prompt = `${scenePlan[i].imagePrompt}. Vertical 9:16 composition. No text, words, watermarks, logos.`;
+        const imgPath = await generateImage(prompt, jobId, i);
+        imagePaths.push(imgPath);
       }
-    }
+    });
 
-    await updateJson(PATHS.content.published_videos, (data: any[]) => [
-      {
-        id: jobId,
-        type: 'video',
-        title: scriptData.title,
-        niche: schedule.niche,
-        postedAt: new Date().toISOString(),
-        status: 'published',
-        facebookUrl: publishTargetId ? `https://facebook.com/${publishTargetId}` : '',
-        caption: scriptData.caption,
-        hashtags: scriptData.hashtags,
-      },
-      ...(Array.isArray(data) ? data : []),
-    ]);
-  });
+    const videoPath = await withStage(schedule, 'video_render_ffmpeg', async () =>
+      assembleVideo(
+        jobId,
+        audioPath,
+        imagePaths,
+        scenePlan.map((s: any) => String(s?.text || '').trim()).filter(Boolean)
+      )
+    );
 
-  await withStage(schedule, 'video_cleanup_assets', async () => cleanupJobAssets(jobId));
+    const videoUrl = await withStage(schedule, 'video_host_catbox', async () => uploadToCatbox(videoPath));
+
+    await withStage(schedule, 'video_publish_facebook', async () => {
+      const description = `${scriptData.caption}\n\n${scriptData.hashtags}`;
+      const fbResult = await postVideoToFacebook(schedule.pageId, videoUrl, description);
+      const publishTargetId = String((fbResult as any)?.post_id || (fbResult as any)?.id || '');
+
+      const settings = await readJson<any>(PATHS.settings);
+      const comment = await generateFacebookComment(scriptData.title, scriptData.caption, topic, settings?.facebookCommentUrl || '');
+
+      if (publishTargetId) {
+        try {
+          await postCommentToFacebook(schedule.pageId, publishTargetId, comment);
+        } catch (error: any) {
+          await logEvent(schedule.type, 'error', `comment_publish_failed id=${schedule.id} message=${error?.message || error}`, schedule.niche);
+        }
+      }
+
+      await updateJson(PATHS.content.published_videos, (data: any[]) => [
+        {
+          id: jobId,
+          type: 'video',
+          title: scriptData.title,
+          niche: schedule.niche,
+          postedAt: new Date().toISOString(),
+          status: 'published',
+          facebookUrl: publishTargetId ? `https://facebook.com/${publishTargetId}` : '',
+          caption: scriptData.caption,
+          hashtags: scriptData.hashtags,
+        },
+        ...(Array.isArray(data) ? data : []),
+      ]);
+    });
+  } finally {
+    await withStage(schedule, 'video_cleanup_assets', async () => cleanupJobAssets(jobId));
+  }
 }
 
 async function runPostPipeline(schedule: Schedule, topic: string) {
