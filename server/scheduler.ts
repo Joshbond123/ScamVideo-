@@ -12,13 +12,22 @@ import {
   generatePostImageWithTitleOverlay,
   cleanupPostImageAsset,
   generateFacebookComment,
+  rewriteTopicForVideo,
 } from './services/videoService';
 import { postCommentToFacebook, postPhotoToFacebook, postVideoToFacebook } from './services/facebookService';
-import { getActiveKeys } from './services/keyService';
+import { getActiveKeys, resolveCloudflareAccountId } from './services/keyService';
 
 const SCHEDULER_TICK_MS = 15_000;
-let schedulerInterval: NodeJS.Timeout | null = null;
+const STALE_GENERATING_MS = 90 * 60 * 1000;
+const MAX_SLEEP_MS = 15 * 60 * 1000;
+let schedulerTimer: NodeJS.Timeout | null = null;
 let isTickRunning = false;
+
+function getScheduleSortTime(schedule: Schedule) {
+  const primary = schedule.createdAt || schedule.scheduledAt;
+  const t = new Date(primary).getTime();
+  return Number.isFinite(t) ? t : 0;
+}
 
 function normalizeError(error: any) {
   if (axios.isAxiosError(error)) {
@@ -43,7 +52,7 @@ async function logEvent(type: 'video' | 'post' | 'system', status: 'success' | '
 
   await updateJson(PATHS.logs, (logs: any[]) => [
     {
-      id: Math.random().toString(36).substr(2, 9),
+      id: Math.random().toString(36).slice(2, 11),
       timestamp: new Date().toISOString(),
       type,
       niche,
@@ -91,34 +100,83 @@ async function validateRequiredConfig(schedule: Schedule) {
   if (!page) missing.push('facebook_page:selected_page_not_found');
   if (page && !page.accessToken) missing.push('facebook_page_access_token');
 
-  const serpstackKey = process.env.SERPSTACK_API_KEY || settings?.serpstackApiKey;
-  if (!serpstackKey) missing.push('serpstackApiKey');
+  if (!settings?.catboxHash) missing.push('catboxHash');
 
-  if (schedule.type === 'video') {
-    if (!settings?.catboxHash) missing.push('catboxHash');
-  } else {
-    if (!settings?.catboxHash) missing.push('catboxHash');
-  }
-
-  if (!process.env.CLOUDFLARE_ACCOUNT_ID) {
-    const workersKeys = await getActiveKeys('workers-ai');
-    if (!workersKeys.some((k) => (k.name || '').trim().length > 0)) {
-      missing.push('CLOUDFLARE_ACCOUNT_ID_or_workers_ai_key_label');
-    }
-  }
+  const cloudflareAccountId = await resolveCloudflareAccountId();
+  if (!cloudflareAccountId) missing.push('cloudflare_account_id');
 
   if (missing.length) {
     throw new Error(`Missing required configuration: ${missing.join(', ')}`);
   }
 }
 
-async function setScheduleStatus(id: string, type: 'video' | 'post', status: any) {
+async function updateSchedule(id: string, type: 'video' | 'post', patch: Partial<Schedule>) {
   const path = type === 'video' ? PATHS.schedules.video : PATHS.schedules.post;
   await updateJson<Schedule[]>(path, (data) => {
-    const idx = data.findIndex((s) => s.id === id);
-    if (idx !== -1) data[idx].status = status;
-    return data;
+    const list = Array.isArray(data) ? data : [];
+    const idx = list.findIndex((s) => s.id === id);
+    if (idx !== -1) {
+      list[idx] = { ...list[idx], ...patch };
+    }
+    return list;
   });
+}
+
+async function setScheduleStatus(id: string, type: 'video' | 'post', status: Schedule['status'], patch: Partial<Schedule> = {}) {
+  await updateSchedule(id, type, { ...patch, status });
+}
+
+async function claimScheduleForRun(id: string, type: 'video' | 'post'): Promise<boolean> {
+  const path = type === 'video' ? PATHS.schedules.video : PATHS.schedules.post;
+  let claimed = false;
+
+  await updateJson<Schedule[]>(path, (data) => {
+    const list = Array.isArray(data) ? data : [];
+    const idx = list.findIndex((s) => s.id === id);
+    if (idx === -1) return list;
+
+    if (list[idx].status !== 'pending') return list;
+
+    list[idx] = {
+      ...list[idx],
+      status: 'generating',
+      startedAt: new Date().toISOString(),
+      errorMessage: '',
+    };
+    claimed = true;
+    return list;
+  });
+
+  return claimed;
+}
+
+async function failStaleGeneratingSchedules(type: 'video' | 'post') {
+  const path = type === 'video' ? PATHS.schedules.video : PATHS.schedules.post;
+  const now = Date.now();
+  const staleIds: string[] = [];
+
+  await updateJson<Schedule[]>(path, (data) => {
+    const list = Array.isArray(data) ? data : [];
+    return list.map((schedule) => {
+      if (schedule.status !== 'generating') return schedule;
+
+      const startedAtMs = new Date(schedule.startedAt || schedule.createdAt || schedule.scheduledAt).getTime();
+      const ageMs = Number.isFinite(startedAtMs) ? now - startedAtMs : Number.POSITIVE_INFINITY;
+      if (ageMs < STALE_GENERATING_MS) return schedule;
+
+      staleIds.push(schedule.id);
+      return {
+        ...schedule,
+        status: 'failed',
+        failedAt: new Date().toISOString(),
+        errorMessage: schedule.errorMessage || 'Job timed out while running. Marked failed so it can be rescheduled.',
+      };
+    });
+  });
+
+  for (const id of staleIds) {
+    await logEvent(type, 'error', `job_stale_timeout id=${id} timeoutMs=${STALE_GENERATING_MS}`, undefined);
+  }
 }
 
 async function processDueSchedules() {
@@ -126,11 +184,13 @@ async function processDueSchedules() {
   isTickRunning = true;
 
   try {
+    await Promise.all([failStaleGeneratingSchedules('video'), failStaleGeneratingSchedules('post')]);
+
     const videoSchedules = await readJson<Schedule[]>(PATHS.schedules.video);
     const postSchedules = await readJson<Schedule[]>(PATHS.schedules.post);
     const pending = [...videoSchedules, ...postSchedules]
       .filter((s) => s.status === 'pending')
-      .sort((a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime());
+      .sort((a, b) => getScheduleSortTime(a) - getScheduleSortTime(b));
 
     if (!pending.length) {
       await logEvent('system', 'info', 'scheduler_tick:no_pending_schedules');
@@ -155,32 +215,74 @@ async function processDueSchedules() {
   }
 }
 
+async function computeNextWakeDelayMs(): Promise<number | null> {
+  const [videoSchedules, postSchedules] = await Promise.all([
+    readJson<Schedule[]>(PATHS.schedules.video),
+    readJson<Schedule[]>(PATHS.schedules.post),
+  ]);
+
+  const pending = [...videoSchedules, ...postSchedules].filter((s) => s.status === 'pending');
+  if (!pending.length) return null;
+
+  const now = Date.now();
+  const nextTs = Math.min(...pending.map((s) => new Date(s.scheduledAt).getTime()));
+  if (!Number.isFinite(nextTs)) return SCHEDULER_TICK_MS;
+
+  const delay = Math.max(0, nextTs - now);
+  return Math.min(Math.max(delay, 1000), MAX_SLEEP_MS);
+}
+
+async function scheduleNextWake() {
+  if (schedulerTimer) {
+    clearTimeout(schedulerTimer);
+    schedulerTimer = null;
+  }
+
+  const delayMs = await computeNextWakeDelayMs();
+  if (delayMs == null) {
+    await logEvent('system', 'info', 'scheduler_sleep:no_pending_jobs');
+    return;
+  }
+
+  schedulerTimer = setTimeout(() => {
+    processDueSchedules()
+      .then(() => scheduleNextWake())
+      .catch(async (error) => {
+        console.error('Scheduler wake failed:', error);
+        await logEvent('system', 'error', `scheduler_wake_failed:${error?.message || error}`);
+        schedulerTimer = setTimeout(() => {
+          processDueSchedules().then(() => scheduleNextWake()).catch(console.error);
+        }, SCHEDULER_TICK_MS);
+      });
+  }, delayMs);
+}
+
 export function requestSchedulerRefresh() {
-  processDueSchedules().catch((error) => {
+  processDueSchedules().then(() => scheduleNextWake()).catch((error) => {
     console.error('Failed to refresh scheduler:', error);
   });
 }
 
 export async function startScheduler() {
   console.log('Scheduler starting...');
-  if (schedulerInterval) clearInterval(schedulerInterval);
+  if (schedulerTimer) clearTimeout(schedulerTimer);
 
   try {
     await processDueSchedules();
+    await scheduleNextWake();
   } catch (error) {
     console.error('Scheduler initial tick failed:', error);
   }
-
-  schedulerInterval = setInterval(() => {
-    processDueSchedules().catch((error) => {
-      console.error('Scheduler interval tick failed:', error);
-    });
-  }, SCHEDULER_TICK_MS);
 }
 
 export async function runJob(schedule: Schedule) {
+  const claimed = await claimScheduleForRun(schedule.id, schedule.type);
+  if (!claimed) {
+    await logEvent(schedule.type, 'info', `job_skip_non_pending id=${schedule.id} status_changed_before_start`, schedule.niche);
+    return;
+  }
+
   await logEvent(schedule.type, 'info', `job_start id=${schedule.id} scheduledAt=${schedule.scheduledAt}`, schedule.niche);
-  await setScheduleStatus(schedule.id, schedule.type, 'generating');
 
   try {
     await withStage(schedule, 'validate_required_config', async () => validateRequiredConfig(schedule));
@@ -196,15 +298,18 @@ export async function runJob(schedule: Schedule) {
     const topic = await withStage(schedule, 'topic_selection', async () => getUniqueTopic(schedule.niche, topicDiscovery.topics));
     if (!topic) throw new Error('No unique topics found');
 
-    await logEvent(schedule.type, 'info', `selected_topic=${topic}`, schedule.niche);
+    const selectedTopic = schedule.type === 'video' ? await withStage(schedule, 'topic_rewrite', async () => rewriteTopicForVideo(schedule.niche, topic)) : topic;
+
+    await logEvent(schedule.type, 'info', `selected_topic=${selectedTopic}`, schedule.niche);
+    await updateSchedule(schedule.id, schedule.type, { lastTopic: selectedTopic });
 
     if (schedule.type === 'video') {
-      await runVideoPipeline(schedule, topic);
+      await runVideoPipeline(schedule, selectedTopic);
     } else {
-      await runPostPipeline(schedule, topic);
+      await runPostPipeline(schedule, selectedTopic);
     }
 
-    await setScheduleStatus(schedule.id, schedule.type, 'posted');
+    await setScheduleStatus(schedule.id, schedule.type, 'posted', { publishedAt: new Date().toISOString(), failedAt: undefined, errorMessage: '' });
     await logEvent(schedule.type, 'success', `job_success id=${schedule.id}`, schedule.niche);
 
     if (schedule.isDaily) {
@@ -216,7 +321,7 @@ export async function runJob(schedule: Schedule) {
 
       const newSchedule: Schedule = {
         ...schedule,
-        id: Math.random().toString(36).substr(2, 9),
+        id: Math.random().toString(36).slice(2, 11),
         scheduledAt: nextDate.toISOString(),
         status: 'pending',
         createdAt: new Date().toISOString(),
@@ -228,7 +333,7 @@ export async function runJob(schedule: Schedule) {
     }
   } catch (error: any) {
     const e = normalizeError(error);
-    await setScheduleStatus(schedule.id, schedule.type, 'failed');
+    await setScheduleStatus(schedule.id, schedule.type, 'failed', { failedAt: new Date().toISOString(), errorMessage: e.message });
     await logEvent(
       schedule.type,
       'error',
@@ -240,63 +345,77 @@ export async function runJob(schedule: Schedule) {
 
 async function runVideoPipeline(schedule: Schedule, topic: string) {
   const jobId = schedule.id;
-  const scriptData = await withStage(schedule, 'video_script_generation', async () => generateScript(schedule.niche, topic));
+  try {
+    const scriptData = await withStage(schedule, 'video_script_generation', async () => generateScript(schedule.niche, topic));
+    await updateSchedule(schedule.id, schedule.type, { generatedTitle: scriptData?.title || '' });
 
-  if (!Array.isArray(scriptData?.scenes) || scriptData.scenes.length === 0) {
-    throw new Error('Generated video script has no scenes');
-  }
-
-  const audioPath = await withStage(schedule, 'video_voiceover_generation', async () => generateVoiceover(scriptData.script, jobId));
-
-  const imagePaths: string[] = [];
-  await withStage(schedule, 'video_scene_image_generation', async () => {
-    for (let i = 0; i < scriptData.scenes.length; i++) {
-      const prompt = `${scriptData.scenes[i].imagePrompt}. Vertical 9:16 composition. No text, words, watermarks, logos.`;
-      const imgPath = await generateImage(prompt, jobId, i);
-      imagePaths.push(imgPath);
+    if (!Array.isArray(scriptData?.scenes) || scriptData.scenes.length === 0) {
+      throw new Error('Generated video script has no scenes');
     }
-  });
 
-  const videoPath = await withStage(schedule, 'video_render_ffmpeg', async () =>
-    assembleVideo(
-      jobId,
-      audioPath,
-      imagePaths,
-      scriptData.scenes.map((s: any) => String(s?.text || '').trim()).filter(Boolean)
-    )
-  );
+    const stitchedScript = [scriptData.hook, scriptData.script, scriptData.preCtaScene?.text, scriptData.cta].filter(Boolean).join(' ');
+    const audioPath = await withStage(schedule, 'video_voiceover_generation', async () => generateVoiceover(stitchedScript, jobId));
 
-  const videoUrl = await withStage(schedule, 'video_host_catbox', async () => uploadToCatbox(videoPath));
+    const scenePlan = [...scriptData.scenes, scriptData.preCtaScene, { text: scriptData.cta, imagePrompt: `Topic-aware call to action visual for ${topic}, dynamic social media ending frame, no text, no logo, vertical 9:16` }].filter(Boolean);
+    const imagePaths: string[] = [];
+    await withStage(schedule, 'video_scene_image_generation', async () => {
+      for (let i = 0; i < scenePlan.length; i++) {
+        const prompt = `${scenePlan[i].imagePrompt}. Vertical 9:16 composition. No text, words, watermarks, logos.`;
+        const imgPath = await generateImage(prompt, jobId, i);
+        imagePaths.push(imgPath);
+      }
+    });
 
-  await withStage(schedule, 'video_publish_facebook', async () => {
-    const description = `${scriptData.caption}\n\n${scriptData.hashtags}`;
-    const fbResult = await postVideoToFacebook(schedule.pageId, videoUrl, description);
+    const videoPath = await withStage(schedule, 'video_render_ffmpeg', async () =>
+      assembleVideo(
+        jobId,
+        audioPath,
+        imagePaths,
+        scenePlan.map((s: any) => String(s?.text || '').trim()).filter(Boolean)
+      )
+    );
 
-    const settings = await readJson<any>(PATHS.settings);
-    const comment = await generateFacebookComment(scriptData.title, scriptData.caption, topic, settings?.facebookCommentUrl || '');
-    await postCommentToFacebook(schedule.pageId, fbResult.id, comment);
+    const videoUrl = await withStage(schedule, 'video_host_catbox', async () => uploadToCatbox(videoPath));
 
-    await updateJson(PATHS.content.published_videos, (data: any[]) => [
-      {
-        id: jobId,
-        type: 'video',
-        title: scriptData.title,
-        niche: schedule.niche,
-        postedAt: new Date().toISOString(),
-        status: 'published',
-        facebookUrl: `https://facebook.com/${fbResult.id}`,
-        caption: scriptData.caption,
-        hashtags: scriptData.hashtags,
-      },
-      ...(Array.isArray(data) ? data : []),
-    ]);
-  });
+    await withStage(schedule, 'video_publish_facebook', async () => {
+      const description = `${scriptData.caption}\n\n${scriptData.hashtags}`;
+      const fbResult = await postVideoToFacebook(schedule.pageId, videoUrl, description);
+      const publishTargetId = String((fbResult as any)?.post_id || (fbResult as any)?.id || '');
 
-  await withStage(schedule, 'video_cleanup_assets', async () => cleanupJobAssets(jobId));
+      const settings = await readJson<any>(PATHS.settings);
+      const comment = await generateFacebookComment(scriptData.title, scriptData.caption, topic, settings?.facebookCommentUrl || '');
+
+      if (publishTargetId) {
+        try {
+          await postCommentToFacebook(schedule.pageId, publishTargetId, comment);
+        } catch (error: any) {
+          await logEvent(schedule.type, 'error', `comment_publish_failed id=${schedule.id} message=${error?.message || error}`, schedule.niche);
+        }
+      }
+
+      await updateJson(PATHS.content.published_videos, (data: any[]) => [
+        {
+          id: jobId,
+          type: 'video',
+          title: scriptData.title,
+          niche: schedule.niche,
+          postedAt: new Date().toISOString(),
+          status: 'published',
+          facebookUrl: publishTargetId ? `https://facebook.com/${publishTargetId}` : '',
+          caption: scriptData.caption,
+          hashtags: scriptData.hashtags,
+        },
+        ...(Array.isArray(data) ? data : []),
+      ]);
+    });
+  } finally {
+    await withStage(schedule, 'video_cleanup_assets', async () => cleanupJobAssets(jobId));
+  }
 }
 
 async function runPostPipeline(schedule: Schedule, topic: string) {
   const scriptData = await withStage(schedule, 'post_script_generation', async () => generateScript(schedule.niche, topic));
+  await updateSchedule(schedule.id, schedule.type, { generatedTitle: scriptData?.title || '' });
 
   if (!Array.isArray(scriptData?.scenes) || scriptData.scenes.length === 0) {
     throw new Error('Generated post script has no scenes');
