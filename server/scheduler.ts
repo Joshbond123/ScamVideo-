@@ -14,11 +14,17 @@ import {
   generateFacebookComment,
 } from './services/videoService';
 import { postCommentToFacebook, postPhotoToFacebook, postVideoToFacebook } from './services/facebookService';
-import { getActiveKeys } from './services/keyService';
+import { getActiveKeys, resolveCloudflareAccountId } from './services/keyService';
 
 const SCHEDULER_TICK_MS = 15_000;
 let schedulerInterval: NodeJS.Timeout | null = null;
 let isTickRunning = false;
+
+function getScheduleSortTime(schedule: Schedule) {
+  const primary = schedule.createdAt || schedule.scheduledAt;
+  const t = new Date(primary).getTime();
+  return Number.isFinite(t) ? t : 0;
+}
 
 function normalizeError(error: any) {
   if (axios.isAxiosError(error)) {
@@ -43,7 +49,7 @@ async function logEvent(type: 'video' | 'post' | 'system', status: 'success' | '
 
   await updateJson(PATHS.logs, (logs: any[]) => [
     {
-      id: Math.random().toString(36).substr(2, 9),
+      id: Math.random().toString(36).slice(2, 11),
       timestamp: new Date().toISOString(),
       type,
       niche,
@@ -91,18 +97,10 @@ async function validateRequiredConfig(schedule: Schedule) {
   if (!page) missing.push('facebook_page:selected_page_not_found');
   if (page && !page.accessToken) missing.push('facebook_page_access_token');
 
-  if (schedule.type === 'video') {
-    if (!settings?.catboxHash) missing.push('catboxHash');
-  } else {
-    if (!settings?.catboxHash) missing.push('catboxHash');
-  }
+  if (!settings?.catboxHash) missing.push('catboxHash');
 
-  if (!process.env.CLOUDFLARE_ACCOUNT_ID) {
-    const workersKeys = await getActiveKeys('workers-ai');
-    if (!workersKeys.some((k) => (k.name || '').trim().length > 0)) {
-      missing.push('CLOUDFLARE_ACCOUNT_ID_or_workers_ai_key_label');
-    }
-  }
+  const cloudflareAccountId = await resolveCloudflareAccountId();
+  if (!cloudflareAccountId) missing.push('cloudflare_account_id');
 
   if (missing.length) {
     throw new Error(`Missing required configuration: ${missing.join(', ')}`);
@@ -125,6 +123,30 @@ async function setScheduleStatus(id: string, type: 'video' | 'post', status: Sch
   await updateSchedule(id, type, { ...patch, status });
 }
 
+async function claimScheduleForRun(id: string, type: 'video' | 'post'): Promise<boolean> {
+  const path = type === 'video' ? PATHS.schedules.video : PATHS.schedules.post;
+  let claimed = false;
+
+  await updateJson<Schedule[]>(path, (data) => {
+    const list = Array.isArray(data) ? data : [];
+    const idx = list.findIndex((s) => s.id === id);
+    if (idx === -1) return list;
+
+    if (list[idx].status !== 'pending') return list;
+
+    list[idx] = {
+      ...list[idx],
+      status: 'generating',
+      startedAt: new Date().toISOString(),
+      errorMessage: '',
+    };
+    claimed = true;
+    return list;
+  });
+
+  return claimed;
+}
+
 async function processDueSchedules() {
   if (isTickRunning) return;
   isTickRunning = true;
@@ -134,7 +156,7 @@ async function processDueSchedules() {
     const postSchedules = await readJson<Schedule[]>(PATHS.schedules.post);
     const pending = [...videoSchedules, ...postSchedules]
       .filter((s) => s.status === 'pending')
-      .sort((a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime());
+      .sort((a, b) => getScheduleSortTime(a) - getScheduleSortTime(b));
 
     if (!pending.length) {
       await logEvent('system', 'info', 'scheduler_tick:no_pending_schedules');
@@ -183,8 +205,13 @@ export async function startScheduler() {
 }
 
 export async function runJob(schedule: Schedule) {
+  const claimed = await claimScheduleForRun(schedule.id, schedule.type);
+  if (!claimed) {
+    await logEvent(schedule.type, 'info', `job_skip_non_pending id=${schedule.id} status_changed_before_start`, schedule.niche);
+    return;
+  }
+
   await logEvent(schedule.type, 'info', `job_start id=${schedule.id} scheduledAt=${schedule.scheduledAt}`, schedule.niche);
-  await setScheduleStatus(schedule.id, schedule.type, 'generating', { startedAt: new Date().toISOString(), errorMessage: '' });
 
   try {
     await withStage(schedule, 'validate_required_config', async () => validateRequiredConfig(schedule));
@@ -221,7 +248,7 @@ export async function runJob(schedule: Schedule) {
 
       const newSchedule: Schedule = {
         ...schedule,
-        id: Math.random().toString(36).substr(2, 9),
+        id: Math.random().toString(36).slice(2, 11),
         scheduledAt: nextDate.toISOString(),
         status: 'pending',
         createdAt: new Date().toISOString(),
@@ -246,6 +273,7 @@ export async function runJob(schedule: Schedule) {
 async function runVideoPipeline(schedule: Schedule, topic: string) {
   const jobId = schedule.id;
   const scriptData = await withStage(schedule, 'video_script_generation', async () => generateScript(schedule.niche, topic));
+  await updateSchedule(schedule.id, schedule.type, { generatedTitle: scriptData?.title || '' });
 
   if (!Array.isArray(scriptData?.scenes) || scriptData.scenes.length === 0) {
     throw new Error('Generated video script has no scenes');
@@ -281,8 +309,6 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
     const comment = await generateFacebookComment(scriptData.title, scriptData.caption, topic, settings?.facebookCommentUrl || '');
     await postCommentToFacebook(schedule.pageId, fbResult.id, comment);
 
-    await updateSchedule(schedule.id, schedule.type, { generatedTitle: scriptData.title });
-
     await updateJson(PATHS.content.published_videos, (data: any[]) => [
       {
         id: jobId,
@@ -304,6 +330,7 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
 
 async function runPostPipeline(schedule: Schedule, topic: string) {
   const scriptData = await withStage(schedule, 'post_script_generation', async () => generateScript(schedule.niche, topic));
+  await updateSchedule(schedule.id, schedule.type, { generatedTitle: scriptData?.title || '' });
 
   if (!Array.isArray(scriptData?.scenes) || scriptData.scenes.length === 0) {
     throw new Error('Generated post script has no scenes');
@@ -318,8 +345,6 @@ async function runPostPipeline(schedule: Schedule, topic: string) {
 
   await withStage(schedule, 'post_publish_facebook', async () => {
     const fbResult = await postPhotoToFacebook(schedule.pageId, imageUrl, `${scriptData.caption}\n\n${scriptData.hashtags}`);
-
-    await updateSchedule(schedule.id, schedule.type, { generatedTitle: scriptData.title });
 
     await updateJson(PATHS.content.published_posts, (data: any[]) => [
       {

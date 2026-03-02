@@ -2,6 +2,8 @@ import express from 'express';
 import path from 'path';
 import crypto from 'crypto';
 import { createServer as createViteServer } from 'vite';
+import axios from 'axios';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import { initDb, readJson, updateJson, writeJson, PATHS, appendJson } from './server/db';
 import { deleteApiKey, insertApiKey, listApiKeys, patchApiKey } from './server/services/supabaseKeyStore';
 import { startScheduler, runJob, requestSchedulerRefresh } from './server/scheduler';
@@ -35,8 +37,17 @@ function buildScheduleDiagnostics(logs: any[]) {
   return byId;
 }
 
+function configureAxiosProxySupport() {
+  const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
+  if (!proxyUrl) return;
+
+  const agent = new HttpsProxyAgent(proxyUrl);
+  axios.defaults.httpsAgent = agent;
+  axios.defaults.proxy = false;
+}
 
 async function startServer() {
+  configureAxiosProxySupport();
   await initDb();
   
   const app = express();
@@ -182,7 +193,6 @@ async function startServer() {
       res.json(updated);
     }
   });
-
 
 
   app.put('/api/facebook/pages/:id', async (req, res) => {

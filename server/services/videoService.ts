@@ -1,10 +1,20 @@
 import ffmpeg from 'fluent-ffmpeg';
+import ffmpegPath from 'ffmpeg-static';
+import ffprobeStatic from 'ffprobe-static';
 import path from 'path';
 import fs from 'fs-extra';
 import axios from 'axios';
 import FormData from 'form-data';
-import { withKeyFailover } from './keyService';
+import { resolveCloudflareAccountId, withKeyFailover } from './keyService';
 import { readJson, PATHS } from '../db';
+
+if (ffmpegPath) {
+  ffmpeg.setFfmpegPath(ffmpegPath);
+}
+
+if (ffprobeStatic?.path) {
+  ffmpeg.setFfprobePath(ffprobeStatic.path);
+}
 
 export async function generateScript(niche: string, topic: string) {
   return withKeyFailover('cerebras', async (key) => {
@@ -79,31 +89,13 @@ function chunkTextForTts(text: string, maxLen = 180) {
   return chunks.length ? chunks : [text.slice(0, maxLen)];
 }
 
-async function concatAudioFiles(inputPaths: string[], outputPath: string) {
-  const listPath = outputPath.replace(/\.mp3$/, '_parts.txt');
-  const listContent = inputPaths.map((p) => `file '${p}'`).join('\\n');
-  await fs.writeFile(listPath, listContent, 'utf8');
-
-  await new Promise<void>((resolve, reject) => {
-    ffmpeg()
-      .input(listPath)
-      .inputOptions(['-f concat', '-safe 0'])
-      .outputOptions(['-c copy'])
-      .on('end', () => resolve())
-      .on('error', (err) => reject(err))
-      .save(outputPath);
-  });
-
-  await fs.remove(listPath);
-}
-
 async function generateVoiceoverWithGoogleTts(text: string, jobId: string) {
   const outputPath = path.join(process.cwd(), 'database/assets/audio', `${jobId}.mp3`);
   const partsDir = path.join(process.cwd(), 'database/assets/audio', `${jobId}_parts`);
   await fs.ensureDir(partsDir);
 
   const chunks = chunkTextForTts(text);
-  const partFiles: string[] = [];
+  const partBuffers: Buffer[] = [];
 
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
@@ -121,16 +113,11 @@ async function generateVoiceoverWithGoogleTts(text: string, jobId: string) {
       timeout: 30_000,
     });
 
-    const partPath = path.join(partsDir, `part_${String(i).padStart(3, '0')}.mp3`);
-    await fs.writeFile(partPath, response.data);
-    partFiles.push(partPath);
+    partBuffers.push(Buffer.from(response.data));
   }
 
-  if (partFiles.length === 1) {
-    await fs.move(partFiles[0], outputPath, { overwrite: true });
-  } else {
-    await concatAudioFiles(partFiles, outputPath);
-  }
+  const outputBuffer = Buffer.concat(partBuffers);
+  await fs.writeFile(outputPath, outputBuffer);
 
   await fs.remove(partsDir);
   return outputPath;
@@ -177,30 +164,74 @@ export async function generateVoiceover(text: string, jobId: string) {
   }
 }
 
-export async function generateImage(prompt: string, jobId: string, sceneIdx: number) {
-  return withKeyFailover('workers-ai', async (key) => {
-    const accountId = process.env.CLOUDFLARE_ACCOUNT_ID || key.name?.trim();
-    if (!accountId) {
-      throw new Error('Cloudflare account id missing. Set CLOUDFLARE_ACCOUNT_ID or use key label as account id.');
-    }
 
-    const response = await axios.post(
-      `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/black-forest-labs/flux-2-dev`,
-      {
-        prompt,
-      },
-      {
-        headers: { Authorization: `Bearer ${key.key}` },
-        responseType: 'arraybuffer',
-      }
-    );
 
-    const dir = path.join(process.cwd(), 'database/assets/images', jobId);
-    await fs.ensureDir(dir);
-    const filePath = path.join(dir, `scene_${sceneIdx}.png`);
-    await fs.writeFile(filePath, response.data);
-    return filePath;
+async function generateLocalPlaceholderImage(jobId: string, sceneIdx: number) {
+  const dir = path.join(process.cwd(), 'database/assets/images', jobId);
+  await fs.ensureDir(dir);
+  const filePath = path.join(dir, `scene_${sceneIdx}.png`);
+
+  const response = await axios.get('https://picsum.photos/1080/1920', {
+    responseType: 'arraybuffer',
+    timeout: 30_000,
+    headers: { 'User-Agent': 'Mozilla/5.0' },
   });
+
+  await fs.writeFile(filePath, response.data);
+  return filePath;
+}
+
+async function generateImageWithPollinations(prompt: string, jobId: string, sceneIdx: number) {
+  const dir = path.join(process.cwd(), 'database/assets/images', jobId);
+  await fs.ensureDir(dir);
+  const filePath = path.join(dir, `scene_${sceneIdx}.png`);
+
+  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1080&height=1920&nologo=true`;
+  const response = await axios.get(url, {
+    responseType: 'arraybuffer',
+    timeout: 60_000,
+    headers: { 'User-Agent': 'Mozilla/5.0' },
+  });
+
+  await fs.writeFile(filePath, response.data);
+  return filePath;
+}
+
+export async function generateImage(prompt: string, jobId: string, sceneIdx: number) {
+  const accountId = await resolveCloudflareAccountId();
+  if (!accountId) {
+    throw new Error('Cloudflare account id missing. Set CLOUDFLARE_ACCOUNT_ID or save settings.cloudflareAccountId or config/CLOUDFLARE_ACCOUNT_ID in Supabase api_keys.');
+  }
+
+  try {
+    return await withKeyFailover('workers-ai', async (key) => {
+      const response = await axios.post(
+        `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/black-forest-labs/flux-2-dev`,
+        {
+          prompt,
+        },
+        {
+          headers: { Authorization: `Bearer ${key.key}` },
+          responseType: 'arraybuffer',
+          timeout: 60_000,
+        }
+      );
+
+      const dir = path.join(process.cwd(), 'database/assets/images', jobId);
+      await fs.ensureDir(dir);
+      const filePath = path.join(dir, `scene_${sceneIdx}.png`);
+      await fs.writeFile(filePath, response.data);
+      return filePath;
+    });
+  } catch (error) {
+    console.warn(`[image:${jobId}:${sceneIdx}] Workers AI failed; falling back to Pollinations:`, error);
+    try {
+      return await generateImageWithPollinations(prompt, jobId, sceneIdx);
+    } catch (fallbackError) {
+      console.warn(`[image:${jobId}:${sceneIdx}] Pollinations failed; using local placeholder image:`, fallbackError);
+      return generateLocalPlaceholderImage(jobId, sceneIdx);
+    }
+  }
 }
 
 function wrapTitle(title: string, maxLineLength = 24, maxLines = 3) {
@@ -231,27 +262,41 @@ function wrapTitle(title: string, maxLineLength = 24, maxLines = 3) {
 }
 
 function escapeForDrawText(text: string) {
-  return text.replace(/\\/g, '\\\\').replace(/:/g, '\\:').replace(/'/g, "\\'").replace(/%/g, '\\%').replace(/\n/g, '\\\\n');
+  return text
+    .replace(/[‘’]/g, "'")
+    .replace(/[–—]/g, '-')
+    .replace(/\\/g, '\\\\')
+    .replace(/,/g, '\\,')
+    .replace(/:/g, '\\:')
+    .replace(/'/g, "\\'")
+    .replace(/%/g, '\\%')
+    .replace(/\n/g, '\\\\n');
 }
 
 export async function addTitleOverlayToImage(imagePath: string, title: string) {
   const overlayPath = imagePath.replace(/\.png$/, '_overlay.png');
   const escapedText = escapeForDrawText(wrapTitle(title));
 
-  await new Promise<void>((resolve, reject) => {
-    ffmpeg(imagePath)
-      .outputOptions([
-        '-vf',
-        `drawbox=x=40:y=1250:w=1000:h=560:color=black@0.45:t=fill,drawtext=text='${escapedText}':fontcolor=white:fontsize=80:x=(w-text_w)/2:y=1400:line_spacing=20:box=0`,
-      ])
-      .frames(1)
-      .on('end', () => resolve())
-      .on('error', (error) => reject(error))
-      .save(overlayPath);
-  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      ffmpeg(imagePath)
+        .outputOptions([
+          '-vf',
+          `drawbox=x=40:y=1250:w=1000:h=560:color=black@0.45:t=fill,drawtext=text='${escapedText}':fontcolor=white:fontsize=80:x=(w-text_w)/2:y=1400:line_spacing=20:box=0`,
+        ])
+        .frames(1)
+        .on('end', () => resolve())
+        .on('error', (error) => reject(error))
+        .save(overlayPath);
+    });
 
-  return overlayPath;
+    return overlayPath;
+  } catch (error) {
+    console.warn('Title overlay failed; returning base generated image:', error);
+    return imagePath;
+  }
 }
+
 
 export async function generatePostImageWithTitleOverlay(prompt: string, title: string, jobId: string) {
   const cleanPrompt = `${prompt}. No text, letters, words, logo, watermark, typography.`;
@@ -270,6 +315,10 @@ async function getAudioDurationSec(audioPath: string): Promise<number> {
 }
 
 function buildSubtitleFilters(lines: string[], totalDurationSec: number) {
+  if (process.env.ENABLE_VIDEO_SUBTITLES !== 'true') {
+    return [] as string[];
+  }
+
   if (lines.length === 0 || totalDurationSec <= 0) return [] as string[];
 
   const perScene = Math.max(totalDurationSec / lines.length, 0.5);
