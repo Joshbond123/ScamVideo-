@@ -198,13 +198,13 @@ async function generateImageWithPollinations(prompt: string, jobId: string, scen
 }
 
 export async function generateImage(prompt: string, jobId: string, sceneIdx: number) {
+  const accountId = await resolveCloudflareAccountId();
+  if (!accountId) {
+    throw new Error('Cloudflare account id missing. Set CLOUDFLARE_ACCOUNT_ID or save settings.cloudflareAccountId or config/CLOUDFLARE_ACCOUNT_ID in Supabase api_keys.');
+  }
+
   try {
     return await withKeyFailover('workers-ai', async (key) => {
-      const accountId = await resolveCloudflareAccountId();
-      if (!accountId) {
-        throw new Error('Cloudflare account id missing. Set CLOUDFLARE_ACCOUNT_ID or save settings.cloudflareAccountId or config/CLOUDFLARE_ACCOUNT_ID in Supabase api_keys.');
-      }
-
       const response = await axios.post(
         `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/black-forest-labs/flux-2-dev`,
         {

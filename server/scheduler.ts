@@ -91,11 +91,7 @@ async function validateRequiredConfig(schedule: Schedule) {
   if (!page) missing.push('facebook_page:selected_page_not_found');
   if (page && !page.accessToken) missing.push('facebook_page_access_token');
 
-  if (schedule.type === 'video') {
-    if (!settings?.catboxHash) missing.push('catboxHash');
-  } else {
-    if (!settings?.catboxHash) missing.push('catboxHash');
-  }
+  if (!settings?.catboxHash) missing.push('catboxHash');
 
   const cloudflareAccountId = await resolveCloudflareAccountId();
   if (!cloudflareAccountId) missing.push('cloudflare_account_id');
