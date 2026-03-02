@@ -224,11 +224,11 @@ export async function generateImage(prompt: string, jobId: string, sceneIdx: num
       return filePath;
     });
   } catch (error) {
-    console.warn('Workers AI image generation failed; falling back to Pollinations:', error);
+    console.warn(`[image:${jobId}:${sceneIdx}] Workers AI failed; falling back to Pollinations:`, error);
     try {
       return await generateImageWithPollinations(prompt, jobId, sceneIdx);
     } catch (fallbackError) {
-      console.warn('Pollinations fallback failed; using local placeholder image:', fallbackError);
+      console.warn(`[image:${jobId}:${sceneIdx}] Pollinations failed; using local placeholder image:`, fallbackError);
       return generateLocalPlaceholderImage(jobId, sceneIdx);
     }
   }

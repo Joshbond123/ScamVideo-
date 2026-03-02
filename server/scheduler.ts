@@ -20,6 +20,12 @@ const SCHEDULER_TICK_MS = 15_000;
 let schedulerInterval: NodeJS.Timeout | null = null;
 let isTickRunning = false;
 
+function getScheduleSortTime(schedule: Schedule) {
+  const primary = schedule.createdAt || schedule.scheduledAt;
+  const t = new Date(primary).getTime();
+  return Number.isFinite(t) ? t : 0;
+}
+
 function normalizeError(error: any) {
   if (axios.isAxiosError(error)) {
     return {
@@ -43,7 +49,7 @@ async function logEvent(type: 'video' | 'post' | 'system', status: 'success' | '
 
   await updateJson(PATHS.logs, (logs: any[]) => [
     {
-      id: Math.random().toString(36).substr(2, 9),
+      id: Math.random().toString(36).slice(2, 11),
       timestamp: new Date().toISOString(),
       type,
       niche,
@@ -150,7 +156,7 @@ async function processDueSchedules() {
     const postSchedules = await readJson<Schedule[]>(PATHS.schedules.post);
     const pending = [...videoSchedules, ...postSchedules]
       .filter((s) => s.status === 'pending')
-      .sort((a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime());
+      .sort((a, b) => getScheduleSortTime(a) - getScheduleSortTime(b));
 
     if (!pending.length) {
       await logEvent('system', 'info', 'scheduler_tick:no_pending_schedules');
@@ -242,7 +248,7 @@ export async function runJob(schedule: Schedule) {
 
       const newSchedule: Schedule = {
         ...schedule,
-        id: Math.random().toString(36).substr(2, 9),
+        id: Math.random().toString(36).slice(2, 11),
         scheduledAt: nextDate.toISOString(),
         status: 'pending',
         createdAt: new Date().toISOString(),
