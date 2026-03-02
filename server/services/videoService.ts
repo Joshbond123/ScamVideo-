@@ -1,6 +1,3 @@
-import ffmpeg from 'fluent-ffmpeg';
-import ffmpegPath from 'ffmpeg-static';
-import ffprobeStatic from 'ffprobe-static';
 import path from 'path';
 import fs from 'fs-extra';
 import axios from 'axios';
@@ -20,13 +17,6 @@ type GeneratedScript = {
   hashtags: string;
 };
 
-if (ffmpegPath) {
-  ffmpeg.setFfmpegPath(ffmpegPath);
-}
-
-if (ffprobeStatic?.path) {
-  ffmpeg.setFfprobePath(ffprobeStatic.path);
-}
 
 function extractJsonObject(raw: string) {
   const trimmed = raw.trim();
@@ -331,67 +321,8 @@ export async function generateImage(prompt: string, jobId: string, sceneIdx: num
   }
 }
 
-function wrapTitle(title: string, maxLineLength = 24, maxLines = 3) {
-  const words = title.trim().split(/\s+/).filter(Boolean);
-  const lines: string[] = [];
-
-  for (const word of words) {
-    if (!lines.length) {
-      lines.push(word);
-      continue;
-    }
-
-    const current = lines[lines.length - 1];
-    if (`${current} ${word}`.length <= maxLineLength) {
-      lines[lines.length - 1] = `${current} ${word}`;
-      continue;
-    }
-
-    if (lines.length < maxLines) {
-      lines.push(word);
-    } else {
-      lines[lines.length - 1] = `${lines[lines.length - 1]}...`;
-      break;
-    }
-  }
-
-  return lines.join('\n');
-}
-
-function escapeForDrawText(text: string) {
-  return text
-    .replace(/[‘’]/g, "'")
-    .replace(/[–—]/g, '-')
-    .replace(/\\/g, '\\\\')
-    .replace(/,/g, '\\,')
-    .replace(/:/g, '\\:')
-    .replace(/'/g, "\\'")
-    .replace(/%/g, '\\%')
-    .replace(/\n/g, '\\\\n');
-}
-
-export async function addTitleOverlayToImage(imagePath: string, title: string) {
-  const overlayPath = imagePath.replace(/\.png$/, '_overlay.png');
-  const escapedText = escapeForDrawText(wrapTitle(title));
-
-  try {
-    await new Promise<void>((resolve, reject) => {
-      ffmpeg(imagePath)
-        .outputOptions([
-          '-vf',
-          `drawbox=x=40:y=1250:w=1000:h=560:color=black@0.45:t=fill,drawtext=text='${escapedText}':fontcolor=white:fontsize=80:x=(w-text_w)/2:y=1400:line_spacing=20:box=0`,
-        ])
-        .frames(1)
-        .on('end', () => resolve())
-        .on('error', (error) => reject(error))
-        .save(overlayPath);
-    });
-
-    return overlayPath;
-  } catch (error) {
-    console.warn('Title overlay failed; returning base generated image:', error);
-    return imagePath;
-  }
+export async function addTitleOverlayToImage(imagePath: string, _title: string) {
+  return imagePath;
 }
 
 
@@ -401,105 +332,12 @@ export async function generatePostImageWithTitleOverlay(prompt: string, title: s
   return addTitleOverlayToImage(imagePath, title);
 }
 
-async function getAudioDurationSec(audioPath: string): Promise<number> {
-  return await new Promise<number>((resolve, reject) => {
-    ffmpeg.ffprobe(audioPath, (err, data) => {
-      if (err) return reject(err);
-      const duration = Number(data?.format?.duration || 0);
-      resolve(Number.isFinite(duration) && duration > 0 ? duration : 0);
-    });
-  });
-}
-
-function sanitizeSubtitleLine(line: string) {
-  return line
-    .replace(/[‘’]/g, "'")
-    .replace(/[–—‑]/g, '-')
-    .replace(/[^a-zA-Z0-9\s.,!?'-]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function toAssTime(seconds: number) {
-  const total = Math.max(0, seconds);
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = Math.floor(total % 60);
-  const cs = Math.floor((total - Math.floor(total)) * 100);
-  return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
-}
-
-async function buildSubtitleFilters(lines: string[], totalDurationSec: number, jobId: string) {
-  if (lines.length === 0 || totalDurationSec <= 0) return [] as string[];
-
-  const perScene = Math.max(totalDurationSec / lines.length, 0.5);
-  const safeLines = lines.map(sanitizeSubtitleLine).filter(Boolean);
-  if (!safeLines.length) return [] as string[];
-
-  const assPath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.ass`);
-  const assLines = [
-    '[Script Info]',
-    'ScriptType: v4.00+',
-    'PlayResX: 1080',
-    'PlayResY: 1920',
-    '',
-    '[V4+ Styles]',
-    'Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding',
-    'Style: Viral,Arial,54,&H00FFFFFF,&H000000FF,&H00000000,&H66000000,1,0,0,0,100,100,0,0,3,2,0,2,60,60,80,1',
-    '',
-    '[Events]',
-    'Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text',
-  ];
-
-  safeLines.forEach((line, i) => {
-    const start = toAssTime(i * perScene);
-    const end = toAssTime((i + 1) * perScene);
-    const text = line.replace(/,/g, '\\,').replace(/\{/g, '(').replace(/\}/g, ')');
-    assLines.push(`Dialogue: 0,${start},${end},Viral,,0,0,0,,${text}`);
-  });
-
-  await fs.writeFile(assPath, assLines.join('\n'), 'utf8');
-
-  const escapedPath = assPath.replace(/\\/g, '/').replace(/:/g, '\\:');
-  return [`[v0]subtitles='${escapedPath}'[v_sub_0]`];
-}
-
 export async function assembleVideo(jobId: string, audioPath: string, imagePaths: string[], subtitleLines: string[]) {
-  const outputPath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.mp4`);
-
-  try {
-    const remote = await renderVideoViaSupabaseFunction({ jobId, audioPath, imagePaths, subtitleLines });
-    if (remote?.localOutput) {
-      return remote.localOutput;
-    }
-  } catch (error) {
-    console.warn(`[video:${jobId}] Supabase render function failed, using local ffmpeg fallback:`, error);
+  const remote = await renderVideoViaSupabaseFunction({ jobId, audioPath, imagePaths, subtitleLines });
+  if (!remote?.localOutput) {
+    throw new Error('Supabase render function did not return output. Configure SUPABASE_RENDER_FUNCTION_URL and ensure the function renders FFmpeg output.');
   }
-
-  const totalDurationSec = await getAudioDurationSec(audioPath);
-  const baseFilters = [
-    `concat=n=${imagePaths.length}:v=1:a=0[v]`,
-    `[v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v0]`,
-  ];
-  const subtitleFilters = await buildSubtitleFilters(subtitleLines, totalDurationSec, jobId);
-  const allFilters = [...baseFilters, ...subtitleFilters];
-  const outputLabel = subtitleFilters.length ? `[v_sub_${subtitleFilters.length - 1}]` : '[v0]';
-
-  return new Promise<string>((resolve, reject) => {
-    let command = ffmpeg();
-
-    imagePaths.forEach((img) => {
-      command = command.input(img).loop(5);
-    });
-
-    command
-      .input(audioPath)
-      .complexFilter(allFilters, [outputLabel.replace(/\[|\]/g, '')])
-      .outputOptions(['-pix_fmt yuv420p', '-shortest'])
-      .on('end', () => resolve(outputPath))
-      .on('error', (err) => reject(err))
-      .save(outputPath);
-  });
+  return remote.localOutput;
 }
 
 export async function uploadToCatbox(filePath: string) {
