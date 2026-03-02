@@ -3,12 +3,19 @@ import { ApiKey } from '../../src/types';
 
 type ApiKeyRow = {
   id: string;
-  key_type: ApiKey['provider'];
+  key_type: string;
   key_name: string | null;
   encrypted_key: string;
   metadata: Record<string, any> | null;
   created_at?: string;
   updated_at?: string;
+};
+
+type GenericKeyRow = {
+  id: string;
+  key_type: string;
+  key_name: string | null;
+  encrypted_key: string;
 };
 
 function getSupabaseConfigOrThrow() {
@@ -39,7 +46,7 @@ function rowToApiKey(row: ApiKeyRow): ApiKey {
   const metadata = row.metadata || {};
   return {
     id: row.id,
-    provider: row.key_type,
+    provider: row.key_type as ApiKey['provider'],
     name: row.key_name || `Key ${row.id.slice(0, 8)}`,
     key: row.encrypted_key,
     lastUsed: typeof metadata.lastUsed === 'string' ? metadata.lastUsed : undefined,
@@ -62,6 +69,23 @@ async function getRow(provider: ApiKey['provider'], id: string): Promise<ApiKeyR
 
   const rows = Array.isArray(response.data) ? response.data : [];
   return (rows[0] as ApiKeyRow | undefined) || null;
+}
+
+export async function getKeyValueByTypeAndName(keyType: string, keyName: string): Promise<string | null> {
+  const client = getSupabaseRestClient();
+  const response = await client.get('/api_keys', {
+    params: {
+      key_type: `eq.${keyType}`,
+      key_name: `eq.${keyName}`,
+      select: 'id,key_type,key_name,encrypted_key',
+      order: 'updated_at.desc',
+      limit: 1,
+    },
+  });
+
+  const rows = Array.isArray(response.data) ? response.data : [];
+  const row = (rows[0] as GenericKeyRow | undefined) || null;
+  return row?.encrypted_key || null;
 }
 
 export async function listApiKeys(provider: ApiKey['provider']): Promise<ApiKey[]> {

@@ -14,7 +14,7 @@ import {
   generateFacebookComment,
 } from './services/videoService';
 import { postCommentToFacebook, postPhotoToFacebook, postVideoToFacebook } from './services/facebookService';
-import { getActiveKeys } from './services/keyService';
+import { getActiveKeys, resolveCloudflareAccountId } from './services/keyService';
 
 const SCHEDULER_TICK_MS = 15_000;
 let schedulerInterval: NodeJS.Timeout | null = null;
@@ -97,12 +97,8 @@ async function validateRequiredConfig(schedule: Schedule) {
     if (!settings?.catboxHash) missing.push('catboxHash');
   }
 
-  if (!process.env.CLOUDFLARE_ACCOUNT_ID) {
-    const workersKeys = await getActiveKeys('workers-ai');
-    if (!workersKeys.some((k) => (k.name || '').trim().length > 0)) {
-      missing.push('CLOUDFLARE_ACCOUNT_ID_or_workers_ai_key_label');
-    }
-  }
+  const cloudflareAccountId = await resolveCloudflareAccountId();
+  if (!cloudflareAccountId) missing.push('cloudflare_account_id');
 
   if (missing.length) {
     throw new Error(`Missing required configuration: ${missing.join(', ')}`);

@@ -5,7 +5,7 @@ import path from 'path';
 import fs from 'fs-extra';
 import axios from 'axios';
 import FormData from 'form-data';
-import { withKeyFailover } from './keyService';
+import { resolveCloudflareAccountId, withKeyFailover } from './keyService';
 import { readJson, PATHS } from '../db';
 
 if (ffmpegPath) {
@@ -200,11 +200,9 @@ async function generateImageWithPollinations(prompt: string, jobId: string, scen
 export async function generateImage(prompt: string, jobId: string, sceneIdx: number) {
   try {
     return await withKeyFailover('workers-ai', async (key) => {
-      const keyLabel = (key.name || '').trim();
-      const accountIdFromLabel = /^[a-f0-9]{32}$/i.test(keyLabel) ? keyLabel : '';
-      const accountId = process.env.CLOUDFLARE_ACCOUNT_ID || accountIdFromLabel;
+      const accountId = await resolveCloudflareAccountId();
       if (!accountId) {
-        throw new Error('Cloudflare account id missing. Set CLOUDFLARE_ACCOUNT_ID or name workers-ai key with 32-char account id.');
+        throw new Error('Cloudflare account id missing. Set CLOUDFLARE_ACCOUNT_ID or save settings.cloudflareAccountId or config/CLOUDFLARE_ACCOUNT_ID in Supabase api_keys.');
       }
 
       const response = await axios.post(
