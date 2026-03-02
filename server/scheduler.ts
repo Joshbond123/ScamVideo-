@@ -12,6 +12,7 @@ import {
   generatePostImageWithTitleOverlay,
   cleanupPostImageAsset,
   generateFacebookComment,
+  generateViralPost,
   rewriteTopicForVideo,
 } from './services/videoService';
 import { postCommentToFacebook, postPhotoToFacebook, postVideoToFacebook } from './services/facebookService';
@@ -414,35 +415,44 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
 }
 
 async function runPostPipeline(schedule: Schedule, topic: string) {
-  const scriptData = await withStage(schedule, 'post_script_generation', async () => generateScript(schedule.niche, topic));
-  await updateSchedule(schedule.id, schedule.type, { generatedTitle: scriptData?.title || '' });
-
-  if (!Array.isArray(scriptData?.scenes) || scriptData.scenes.length === 0) {
-    throw new Error('Generated post script has no scenes');
-  }
+  const postData = await withStage(schedule, 'post_script_generation', async () => generateViralPost(schedule.niche, topic));
+  await updateSchedule(schedule.id, schedule.type, { generatedTitle: postData?.title || '' });
 
   const imgPath = await withStage(schedule, 'post_image_generation_with_overlay', async () =>
-    generatePostImageWithTitleOverlay(scriptData.scenes[0].imagePrompt, scriptData.title, schedule.id)
+    generatePostImageWithTitleOverlay(postData.imagePrompt, postData.overlayText, schedule.id)
   );
 
   const imageUrl = await withStage(schedule, 'post_host_catbox', async () => uploadToCatbox(imgPath));
   await withStage(schedule, 'post_cleanup_local_asset', async () => cleanupPostImageAsset(imgPath));
 
   await withStage(schedule, 'post_publish_facebook', async () => {
-    const fbResult = await postPhotoToFacebook(schedule.pageId, imageUrl, `${scriptData.caption}\n\n${scriptData.hashtags}`);
+    const description = `${postData.caption}\n\n${postData.victimCta}\n\n${postData.hashtags}`;
+    const fbResult = await postPhotoToFacebook(schedule.pageId, imageUrl, description);
+    const publishTargetId = String((fbResult as any)?.post_id || (fbResult as any)?.id || '');
+
+    const settings = await readJson<any>(PATHS.settings);
+    const comment = await generateFacebookComment(postData.title, postData.caption, topic, settings?.facebookCommentUrl || '');
+
+    if (publishTargetId) {
+      try {
+        await postCommentToFacebook(schedule.pageId, publishTargetId, comment);
+      } catch (error: any) {
+        await logEvent(schedule.type, 'error', `comment_publish_failed id=${schedule.id} message=${error?.message || error}`, schedule.niche);
+      }
+    }
 
     await updateJson(PATHS.content.published_posts, (data: any[]) => [
       {
         id: schedule.id,
         type: 'post',
-        title: scriptData.title,
+        title: postData.title,
         niche: schedule.niche,
         postedAt: new Date().toISOString(),
         status: 'published',
-        facebookUrl: `https://facebook.com/${fbResult.id}`,
+        facebookUrl: publishTargetId ? `https://facebook.com/${publishTargetId}` : `https://facebook.com/${fbResult.id}`,
         thumbnail: imageUrl,
-        caption: scriptData.caption,
-        hashtags: scriptData.hashtags,
+        caption: postData.caption,
+        hashtags: postData.hashtags,
       },
       ...(Array.isArray(data) ? data : []),
     ]);

@@ -1,3 +1,7 @@
+import ffmpeg from 'fluent-ffmpeg';
+import ffmpegPath from 'ffmpeg-static';
+import ffprobeStatic from 'ffprobe-static';
+import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs-extra';
 import axios from 'axios';
@@ -5,6 +9,14 @@ import FormData from 'form-data';
 import { resolveCloudflareAccountId, withKeyFailover } from './keyService';
 import { readJson, PATHS } from '../db';
 import { deleteSupabaseAssets, pruneSupabaseTempAssets, renderVideoViaSupabaseFunction } from './supabaseStorage';
+
+if (ffmpegPath) {
+  ffmpeg.setFfmpegPath(ffmpegPath);
+}
+
+if (ffprobeStatic?.path) {
+  ffmpeg.setFfprobePath(ffprobeStatic.path);
+}
 
 type GeneratedScript = {
   title: string;
@@ -15,6 +27,15 @@ type GeneratedScript = {
   cta: string;
   caption: string;
   hashtags: string;
+};
+
+type GeneratedViralPost = {
+  title: string;
+  imagePrompt: string;
+  overlayText: string;
+  caption: string;
+  hashtags: string;
+  victimCta: string;
 };
 
 
@@ -141,6 +162,38 @@ export async function generateFacebookComment(title: string, caption: string, to
 
   if (!appendUrl) return base;
   return `${base}\n\nIf you already sent crypto to scammers, use this link to report your case: ${appendUrl}`;
+}
+
+export async function generateViralPost(niche: string, topic: string): Promise<GeneratedViralPost> {
+  const payload = await runCerebrasJson(
+    'You create high-performing viral anti-crypto-scam Facebook image posts. Return strict JSON only.',
+    `Current date: ${new Date().toISOString()}\nNiche: ${niche}\nTopic: ${topic}\n
+Return JSON exactly as:\n{
+  "title": "",
+  "imagePrompt": "",
+  "overlayText": "",
+  "caption": "",
+  "victimCta": "",
+  "hashtags": ""
+}\n
+Rules:\n- title: strong hook, 8-16 words, attention-grabbing, factual.\n- overlayText: 2-4 short lines, viral style, readable, no hashtags.\n- caption: engaging viral-style post body based on topic, 90-170 words.\n- victimCta: MUST focus only on crypto scam victims and say if they already sent crypto they should click link in bio/comments to report the scam and recover lost crypto; include follow/like/share encouragement.\n- imagePrompt: cinematic vertical 9:16, no text, no logo, no watermark.\n- hashtags: exactly 5 hashtags relevant to the topic.`
+  );
+
+  const title = String(payload?.title || topic).trim();
+  const caption = String(payload?.caption || '').trim();
+  const victimCta = String(payload?.victimCta || '').trim() || 'If you already sent crypto to scammers, click the link in bio or comments to report your case and start recovery. Follow, like, and share to protect others.';
+  const hashtags = String(payload?.hashtags || '').trim();
+  const overlayText = String(payload?.overlayText || title).trim();
+  const imagePrompt = String(payload?.imagePrompt || `Viral anti-crypto scam alert visual about ${topic}, dramatic composition, vertical 9:16, no text, no logo, no watermark`).trim();
+
+  return {
+    title,
+    caption,
+    victimCta,
+    hashtags,
+    overlayText,
+    imagePrompt,
+  };
 }
 
 
@@ -322,7 +375,74 @@ export async function generateImage(prompt: string, jobId: string, sceneIdx: num
 }
 
 export async function addTitleOverlayToImage(imagePath: string, _title: string) {
-  return imagePath;
+  const overlayPath = imagePath.replace(/\.png$/i, '_overlay.png');
+  const assPath = imagePath.replace(/\.png$/i, '_overlay.ass');
+  const text = _title
+    .replace(/[‘’]/g, "'")
+    .replace(/[–—]/g, '-')
+    .replace(/[^\w\s.,!?'-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const wrapped = text
+    .split(' ')
+    .reduce<string[]>((lines, word) => {
+      if (!lines.length) return [word];
+      const current = lines[lines.length - 1];
+      if (`${current} ${word}`.length <= 24) {
+        lines[lines.length - 1] = `${current} ${word}`;
+      } else if (lines.length < 4) {
+        lines.push(word);
+      }
+      return lines;
+    }, [])
+    .slice(0, 4)
+    .join('\\N')
+    .replace(/\{/g, '(')
+    .replace(/\}/g, ')');
+
+  if (!wrapped) return imagePath;
+
+  const ass = [
+    '[Script Info]',
+    'ScriptType: v4.00+',
+    'PlayResX: 1024',
+    'PlayResY: 1024',
+    '',
+    '[V4+ Styles]',
+    'Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding',
+    'Style: Viral,Arial,72,&H00FFFFFF,&H0000FFFF,&H00332200,&H70000000,1,0,0,0,100,100,0,0,3,3,0,2,40,40,70,1',
+    '',
+    '[Events]',
+    'Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text',
+    `Dialogue: 0,0:00:00.00,0:00:04.00,Viral,,0,0,0,,${wrapped}`,
+  ].join('\n');
+  await fs.writeFile(assPath, ass, 'utf8');
+  const escapedAssPath = assPath.replace(/\\/g, '/').replace(/:/g, '\\:');
+
+  const ffmpegBin = ffmpegPath || 'ffmpeg';
+  await new Promise<void>((resolve, reject) => {
+    let stderr = '';
+    const proc = spawn(ffmpegBin, [
+      '-y',
+      '-i', imagePath,
+      '-vf',
+      `subtitles='${escapedAssPath}'`,
+      '-frames:v', '1',
+      overlayPath,
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    proc.stderr.on('data', (chunk) => {
+      stderr += String(chunk || '');
+    });
+    proc.on('error', reject);
+    proc.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`overlay ffmpeg exited with ${code}: ${stderr}`))));
+  }).catch((error) => {
+    console.warn('Title overlay generation failed, using base image:', error);
+  });
+
+  await fs.remove(assPath).catch(() => {});
+
+  return (await fs.pathExists(overlayPath)) ? overlayPath : imagePath;
 }
 
 
