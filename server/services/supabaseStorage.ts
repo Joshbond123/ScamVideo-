@@ -4,6 +4,13 @@ import path from 'path';
 
 const DEFAULT_BUCKET = process.env.SUPABASE_MEDIA_BUCKET || 'temp-media';
 
+function resolveRenderFunctionUrl() {
+  if (process.env.SUPABASE_RENDER_FUNCTION_URL) return process.env.SUPABASE_RENDER_FUNCTION_URL;
+  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
+  if (!url) return '';
+  return `${url.replace(/\/$/, '')}/functions/v1/render-video`;
+}
+
 type StorageFile = {
   name: string;
   id?: string;
@@ -80,7 +87,7 @@ export async function renderVideoViaSupabaseFunction(payload: {
   imagePaths: string[];
   subtitleLines: string[];
 }) {
-  const fnUrl = process.env.SUPABASE_RENDER_FUNCTION_URL;
+  const fnUrl = resolveRenderFunctionUrl();
   if (!fnUrl) return null;
 
   const client = makeClient();
@@ -108,7 +115,7 @@ export async function renderVideoViaSupabaseFunction(payload: {
     }
   );
 
-  const renderedPath = response?.data?.outputPath as string | undefined;
+  const renderedPath = (response?.data?.outputPath || response?.data?.result?.outputPath) as string | undefined;
   if (!renderedPath) {
     throw new Error(`Supabase render function response missing outputPath: ${JSON.stringify(response?.data || {})}`);
   }
