@@ -57,6 +57,11 @@ export const api = {
     await client.delete(`/schedules/${type}/${id}`);
   },
 
+
+  updateSchedule: async (id: string, type: 'video' | 'post', payload: Partial<Pick<Schedule, 'niche' | 'pageId' | 'scheduledAt'>>): Promise<void> => {
+    await client.put(`/schedules/${type}/${id}`, payload);
+  },
+
   getPublished: async (): Promise<PublishedItem[]> => {
     const [v, p] = await Promise.all([
       client.get('/content/published-videos'),

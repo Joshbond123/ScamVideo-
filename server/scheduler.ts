@@ -18,6 +18,7 @@ import { postCommentToFacebook, postPhotoToFacebook, postVideoToFacebook } from 
 import { getActiveKeys, resolveCloudflareAccountId } from './services/keyService';
 
 const SCHEDULER_TICK_MS = 15_000;
+const STALE_GENERATING_MS = 90 * 60 * 1000;
 let schedulerInterval: NodeJS.Timeout | null = null;
 let isTickRunning = false;
 
@@ -148,11 +149,42 @@ async function claimScheduleForRun(id: string, type: 'video' | 'post'): Promise<
   return claimed;
 }
 
+async function failStaleGeneratingSchedules(type: 'video' | 'post') {
+  const path = type === 'video' ? PATHS.schedules.video : PATHS.schedules.post;
+  const now = Date.now();
+  const staleIds: string[] = [];
+
+  await updateJson<Schedule[]>(path, (data) => {
+    const list = Array.isArray(data) ? data : [];
+    return list.map((schedule) => {
+      if (schedule.status !== 'generating') return schedule;
+
+      const startedAtMs = new Date(schedule.startedAt || schedule.createdAt || schedule.scheduledAt).getTime();
+      const ageMs = Number.isFinite(startedAtMs) ? now - startedAtMs : Number.POSITIVE_INFINITY;
+      if (ageMs < STALE_GENERATING_MS) return schedule;
+
+      staleIds.push(schedule.id);
+      return {
+        ...schedule,
+        status: 'failed',
+        failedAt: new Date().toISOString(),
+        errorMessage: schedule.errorMessage || 'Job timed out while running. Marked failed so it can be rescheduled.',
+      };
+    });
+  });
+
+  for (const id of staleIds) {
+    await logEvent(type, 'error', `job_stale_timeout id=${id} timeoutMs=${STALE_GENERATING_MS}`, undefined);
+  }
+}
+
 async function processDueSchedules() {
   if (isTickRunning) return;
   isTickRunning = true;
 
   try {
+    await Promise.all([failStaleGeneratingSchedules('video'), failStaleGeneratingSchedules('post')]);
+
     const videoSchedules = await readJson<Schedule[]>(PATHS.schedules.video);
     const postSchedules = await readJson<Schedule[]>(PATHS.schedules.post);
     const pending = [...videoSchedules, ...postSchedules]

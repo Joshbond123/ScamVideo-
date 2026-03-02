@@ -36,6 +36,11 @@ export default function RecentSchedules() {
     };
 
     void load();
+    const intervalId = window.setInterval(() => {
+      void load();
+    }, 20000);
+
+    return () => window.clearInterval(intervalId);
   }, []);
 
   const sorted = useMemo(

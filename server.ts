@@ -16,7 +16,7 @@ function parseScheduleIdFromMessage(message: string): string | null {
 }
 
 function buildScheduleDiagnostics(logs: any[]) {
-  const byId: Record<string, { errorMessage?: string; publishedAt?: string }> = {};
+  const byId: Record<string, { errorMessage?: string; publishedAt?: string; runningAt?: string }> = {};
 
   for (const log of Array.isArray(logs) ? logs : []) {
     if (typeof log?.message !== 'string') continue;
@@ -29,12 +29,23 @@ function buildScheduleDiagnostics(logs: any[]) {
       byId[scheduleId].errorMessage = log.message;
     }
 
+    if (log.message.includes('job_start') && !byId[scheduleId].runningAt) {
+      byId[scheduleId].runningAt = log.timestamp;
+    }
+
     if (log.message.includes('job_success') && !byId[scheduleId].publishedAt) {
       byId[scheduleId].publishedAt = log.timestamp;
     }
   }
 
   return byId;
+}
+
+function deriveScheduleStatus(schedule: Schedule, diagnostics: { errorMessage?: string; publishedAt?: string; runningAt?: string }) {
+  if (schedule.status === 'posted' || diagnostics.publishedAt || schedule.publishedAt) return 'posted' as const;
+  if (schedule.status === 'failed' || diagnostics.errorMessage || schedule.failedAt) return 'failed' as const;
+  if (schedule.status === 'generating' || diagnostics.runningAt || schedule.startedAt) return 'generating' as const;
+  return 'pending' as const;
 }
 
 function configureAxiosProxySupport() {
@@ -242,8 +253,10 @@ async function startServer() {
       .map((schedule) => {
         const page = pageMap.get(schedule.pageId);
         const d = diagnostics[schedule.id] || {};
+        const effectiveStatus = deriveScheduleStatus(schedule, d);
         return {
           ...schedule,
+          status: effectiveStatus,
           pageName: schedule.pageName || page?.name || 'Unknown Page',
           publishedAt: schedule.publishedAt || d.publishedAt,
           errorMessage: schedule.errorMessage || d.errorMessage,
@@ -271,6 +284,29 @@ async function startServer() {
     await appendJson(PATHS.schedules[type], schedule);
     requestSchedulerRefresh();
     res.json(schedule);
+  });
+
+  app.put('/api/schedules/:type/:id', async (req, res) => {
+    const type = req.params.type as 'video' | 'post';
+    const id = req.params.id;
+    const { niche, pageId, scheduledAt } = req.body || {};
+
+    await updateJson<Schedule[]>(PATHS.schedules[type], (schedules) => {
+      const list = Array.isArray(schedules) ? schedules : [];
+      return list.map((schedule) => {
+        if (schedule.id !== id) return schedule;
+        return {
+          ...schedule,
+          niche: typeof niche === 'string' && niche.trim() ? niche.trim() as Schedule['niche'] : schedule.niche,
+          pageId: typeof pageId === 'string' && pageId.trim() ? pageId.trim() : schedule.pageId,
+          scheduledAt: typeof scheduledAt === 'string' && scheduledAt.trim() ? scheduledAt : schedule.scheduledAt,
+          errorMessage: schedule.status === 'pending' ? '' : schedule.errorMessage,
+        };
+      });
+    });
+
+    requestSchedulerRefresh();
+    res.json({ success: true });
   });
 
   app.delete('/api/schedules/:type/:id', async (req, res) => {
