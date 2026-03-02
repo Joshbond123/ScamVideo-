@@ -22,11 +22,17 @@ export const api = {
       client.get('/content/published-posts')
     ]);
 
+    const startOfWindow = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const publishedThisWeek = [...publishedV.data, ...publishedP.data].filter((item: any) => {
+      const ts = new Date(item?.postedAt || item?.publishedAt || 0).getTime();
+      return Number.isFinite(ts) && ts >= startOfWindow;
+    }).length;
+
     return {
       connectedPages: pages.data.length,
       scheduledVideos: videos.data.filter((s: any) => s.status === 'pending').length,
       scheduledPosts: posts.data.filter((s: any) => s.status === 'pending').length,
-      publishedThisWeek: publishedV.data.length + publishedP.data.length
+      publishedThisWeek,
     };
   },
 
@@ -49,6 +55,11 @@ export const api = {
 
   deleteSchedule: async (id: string, type: 'video' | 'post'): Promise<void> => {
     await client.delete(`/schedules/${type}/${id}`);
+  },
+
+
+  updateSchedule: async (id: string, type: 'video' | 'post', payload: Partial<Pick<Schedule, 'niche' | 'pageId' | 'scheduledAt'>>): Promise<void> => {
+    await client.put(`/schedules/${type}/${id}`, payload);
   },
 
   getPublished: async (): Promise<PublishedItem[]> => {
@@ -107,6 +118,16 @@ export const api = {
     await client.post('/settings', { ...settings, catboxHash: hash });
   },
 
+  saveFacebookCommentUrl: async (url: string): Promise<void> => {
+    const settings = await client.get('/settings').then(r => r.data);
+    await client.post('/settings', { ...settings, facebookCommentUrl: url });
+  },
+
+  getFacebookCommentUrl: async (): Promise<string> => {
+    const res = await client.get('/settings');
+    return res.data.facebookCommentUrl || '';
+  },
+
   deleteCatboxHash: async (): Promise<void> => {
     await client.delete('/settings/catbox');
   },
@@ -119,6 +140,11 @@ export const api = {
   getLogs: async (): Promise<LogEntry[]> => {
     const res = await client.get('/logs');
     return res.data;
+  },
+
+  getRecentSchedules: async (limit = 8): Promise<Schedule[]> => {
+    const res = await client.get('/schedules/recent', { params: { limit } });
+    return Array.isArray(res.data) ? res.data : [];
   },
 
   runJobManual: async (id: string, type: 'video' | 'post'): Promise<void> => {

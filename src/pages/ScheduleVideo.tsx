@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { CalendarClock, Clock, Plus, Trash2, Video } from 'lucide-react';
+import { CalendarClock, Clock, Pencil, Plus, Trash2, Video } from 'lucide-react';
 import { api } from '../lib/api';
 import { FacebookPage, Niche, Schedule } from '../types';
-import { Badge, Button, Card, Input, Label } from '../components/ui';
+import { Button, Card, Input, Label } from '../components/ui';
 import { formatDate } from '../lib/utils';
 
 const NICHES: Niche[] = [
@@ -10,6 +10,13 @@ const NICHES: Niche[] = [
   'AI-Driven & Deepfake Crypto Scams',
   'Crypto Scam Statistics & Big Numbers',
 ];
+
+function toTimeValue(iso: string) {
+  const d = new Date(iso);
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${hh}:${mm}`;
+}
 
 export default function ScheduleVideo() {
   const [schedules, setSchedules] = useState<Schedule[]>([]);
@@ -37,13 +44,16 @@ export default function ScheduleVideo() {
       if (!pageId && safePages.length) setPageId(safePages[0].id);
     } catch (error) {
       console.error(error);
-      setNotice('Failed to load video schedules.');
+      setNotice('Failed to load video schedules from Supabase.');
     } finally {
       setLoading(false);
     }
   };
 
-  const pendingSchedules = useMemo(() => schedules.filter((s) => s.status === 'pending'), [schedules]);
+  const pendingSchedules = useMemo(
+    () => schedules.filter((s) => s.isDaily).sort((a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime()),
+    [schedules]
+  );
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -86,9 +96,25 @@ export default function ScheduleVideo() {
     await loadData();
   };
 
-  const handleRun = async (id: string) => {
-    await api.runJobManual(id, 'video');
-    setNotice('Video generation started in background.');
+  const handleEdit = async (schedule: Schedule) => {
+    const nextTime = window.prompt('Set new daily time (HH:MM)', toTimeValue(schedule.scheduledAt));
+    if (!nextTime) return;
+
+    const [hh, mm] = nextTime.split(':').map(Number);
+    if (!Number.isFinite(hh) || !Number.isFinite(mm)) {
+      setNotice('Invalid time format. Use HH:MM.');
+      return;
+    }
+
+    const now = new Date();
+    const updatedRunAt = new Date(now);
+    updatedRunAt.setHours(hh, mm, 0, 0);
+    if (updatedRunAt.getTime() <= now.getTime()) {
+      updatedRunAt.setDate(updatedRunAt.getDate() + 1);
+    }
+
+    await api.updateSchedule(schedule.id, 'video', { scheduledAt: updatedRunAt.toISOString() });
+    setNotice('Schedule time updated.');
     await loadData();
   };
 
@@ -151,12 +177,13 @@ export default function ScheduleVideo() {
                     <div className="flex items-center gap-2">
                       <Video className="w-4 h-4 text-indigo-600" />
                       <p className="font-medium text-slate-900">{schedule.niche}</p>
-                      <Badge variant="warning">{schedule.status}</Badge>
                     </div>
                     <p className="text-xs text-slate-500">{formatDate(schedule.scheduledAt)}</p>
                   </div>
                   <div className="flex gap-2">
-                    <Button size="sm" variant="outline" onClick={() => void handleRun(schedule.id)}>Run now</Button>
+                    <Button size="sm" variant="outline" onClick={() => void handleEdit(schedule)}>
+                      <Pencil className="w-4 h-4" />
+                    </Button>
                     <Button size="sm" variant="outline" className="text-red-600" onClick={() => void handleDelete(schedule.id)}>
                       <Trash2 className="w-4 h-4" />
                     </Button>
