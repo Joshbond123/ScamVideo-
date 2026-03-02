@@ -8,6 +8,17 @@ import FormData from 'form-data';
 import { resolveCloudflareAccountId, withKeyFailover } from './keyService';
 import { readJson, PATHS } from '../db';
 
+type GeneratedScript = {
+  title: string;
+  hook: string;
+  script: string;
+  scenes: Array<{ text: string; imagePrompt: string }>;
+  preCtaScene: { text: string; imagePrompt: string };
+  cta: string;
+  caption: string;
+  hashtags: string;
+};
+
 if (ffmpegPath) {
   ffmpeg.setFfmpegPath(ffmpegPath);
 }
@@ -16,17 +27,30 @@ if (ffprobeStatic?.path) {
   ffmpeg.setFfprobePath(ffprobeStatic.path);
 }
 
-export async function generateScript(niche: string, topic: string) {
+function extractJsonObject(raw: string) {
+  const trimmed = raw.trim();
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    const start = trimmed.indexOf('{');
+    const end = trimmed.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      return JSON.parse(trimmed.slice(start, end + 1));
+    }
+    throw new Error('Model did not return JSON payload');
+  }
+}
+
+async function runCerebrasJson(systemPrompt: string, userPrompt: string) {
   return withKeyFailover('cerebras', async (key) => {
     const response = await axios.post(
       'https://api.cerebras.ai/v1/chat/completions',
       {
         model: 'gpt-oss-120b',
+        temperature: 0.7,
         messages: [
-          {
-            role: 'system',
-            content: `You are an expert social content strategist focused on timely, factual and highly engaging Facebook content.\nCurrent date/time: ${new Date().toISOString()}\nNiche: ${niche}\nSelected trending topic: ${topic}\nCreate a 1-minute script based only on this topic and avoid generic filler.\nReturn strict JSON format: { "title": "", "script": "", "scenes": [{ "text": "", "imagePrompt": "" }], "caption": "", "hashtags": "" }\nRules:\n- scenes must be 6-12 entries with punchy scene text and vivid imagePrompt.\n- caption must be hook-style and policy-safe for Facebook.\n- hashtags must contain exactly 5 viral hashtags related to the title/topic.`,
-          },
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
         ],
       },
       {
@@ -34,8 +58,68 @@ export async function generateScript(niche: string, topic: string) {
       }
     );
 
-    return JSON.parse(response.data.choices[0].message.content);
+    const content = String(response.data?.choices?.[0]?.message?.content || '');
+    return extractJsonObject(content);
   });
+}
+
+export async function rewriteTopicForVideo(niche: string, topic: string): Promise<string> {
+  const out = await runCerebrasJson(
+    'Rewrite trending headlines into concise viral social-video topics. Output JSON only.',
+    `Niche: ${niche}\nOriginal topic: ${topic}\nReturn JSON: {"topic":""}. Keep it factual, attention-grabbing, <= 16 words, no emojis.`
+  );
+  return String(out?.topic || topic).trim() || topic;
+}
+
+function normalizeScriptPayload(payload: any, topic: string): GeneratedScript {
+  const scenes = Array.isArray(payload?.scenes)
+    ? payload.scenes
+        .map((s: any) => ({ text: String(s?.text || '').trim(), imagePrompt: String(s?.imagePrompt || '').trim() }))
+        .filter((s: any) => s.text && s.imagePrompt)
+    : [];
+
+  const baseScenes = scenes.slice(0, 8);
+  const preCtaScene = {
+    text:
+      String(payload?.preCtaScene?.text || '').trim() ||
+      `If you already sent crypto in this ${topic} scam pattern, check our link in bio or pinned comment to report the case and start your recovery review.`,
+    imagePrompt:
+      String(payload?.preCtaScene?.imagePrompt || '').trim() ||
+      'Concerned crypto scam victim speaking with a cybercrime support specialist in a modern office, cinematic lighting, vertical composition, no text',
+  };
+
+  return {
+    title: String(payload?.title || topic).trim(),
+    hook: String(payload?.hook || '').trim(),
+    script: String(payload?.script || '').trim(),
+    scenes: baseScenes,
+    preCtaScene,
+    cta:
+      String(payload?.cta || '').trim() ||
+      'Follow for scam alerts, like if this helped, and share this video to protect more people.',
+    caption: String(payload?.caption || '').trim(),
+    hashtags: String(payload?.hashtags || '').trim(),
+  };
+}
+
+export async function generateScript(niche: string, topic: string): Promise<GeneratedScript> {
+  const payload = await runCerebrasJson(
+    'You create high-retention short-form anti-scam video scripts for Facebook. Return strict JSON only.',
+    `Current date: ${new Date().toISOString()}\nNiche: ${niche}\nTrending topic: ${topic}\n
+Return JSON exactly as:\n{
+  "title": "",
+  "hook": "",
+  "script": "",
+  "scenes": [{"text":"","imagePrompt":""}],
+  "preCtaScene": {"text":"","imagePrompt":""},
+  "cta": "",
+  "caption": "",
+  "hashtags": ""
+}\n
+Rules:\n- scenes: 6-8 entries, each vivid, factual, dynamic, no placeholders.\n- Add one professional preCtaScene specifically telling victims who sent crypto to scammers to check link in bio/comments to report case and recover lost crypto.\n- cta must be topic-based and ONLY ask viewers to follow, like, and share.\n- imagePrompt must request cinematic vertical 9:16 visuals and explicitly say no text/watermarks/logos.\n- hashtags: exactly 5.`
+  );
+
+  return normalizeScriptPayload(payload, topic);
 }
 
 export async function generateFacebookComment(title: string, caption: string, topic: string, appendUrl?: string) {
@@ -48,7 +132,7 @@ export async function generateFacebookComment(title: string, caption: string, to
           {
             role: 'system',
             content:
-              'Write one concise Facebook comment (35-75 words), factual and engaging, tied to the provided topic and title. No markdown. No emojis spam. Do not include hashtags.',
+              'Write one concise Facebook comment (35-75 words), factual and engaging, tied to topic/title. Professional tone. No markdown. No hashtags. Mention no upfront fees. Only the final CTA sentence may mention scam victims reporting their case via link if a URL is provided.',
           },
           {
             role: 'user',
@@ -65,7 +149,7 @@ export async function generateFacebookComment(title: string, caption: string, to
   });
 
   if (!appendUrl) return base;
-  return `${base}\n\n${appendUrl}`;
+  return `${base}\n\nIf you already sent crypto to scammers, use this link to report your case: ${appendUrl}`;
 }
 
 
@@ -128,7 +212,7 @@ export async function generateVoiceover(text: string, jobId: string) {
 
   try {
     return await withKeyFailover('unrealspeech', async (key) => {
-      const endpoints = ['https://api.unrealspeech.com/stream', 'https://api.v8.unrealspeech.com/stream'];
+      const endpoints = ['https://api.v7.unrealspeech.com/stream', 'https://api.unrealspeech.com/stream'];
       let lastError: unknown;
 
       for (const endpoint of endpoints) {
@@ -139,17 +223,23 @@ export async function generateVoiceover(text: string, jobId: string) {
               Text: text,
               VoiceId: 'Will',
               Bitrate: '192k',
-              Speed: '0',
-              Pitch: '1.0',
+              OutputFormat: 'mp3',
+              Speed: 0,
+              Pitch: 1,
             },
             {
-              headers: { Authorization: `Bearer ${key.key}` },
+              headers: {
+                Authorization: `Bearer ${key.key}`,
+                Accept: 'audio/mpeg,application/octet-stream,*/*',
+              },
               responseType: 'arraybuffer',
-              timeout: 45_000,
+              timeout: 60_000,
             }
           );
 
-          await fs.writeFile(filePath, response.data);
+          const buffer = Buffer.from(response.data || []);
+          if (!buffer.length) throw new Error('UnrealSpeech returned empty audio payload');
+          await fs.writeFile(filePath, buffer);
           return filePath;
         } catch (error) {
           lastError = error;
@@ -159,7 +249,7 @@ export async function generateVoiceover(text: string, jobId: string) {
       throw lastError instanceof Error ? lastError : new Error('UnrealSpeech request failed');
     });
   } catch (error) {
-    console.warn('UnrealSpeech failed; falling back to free Google TTS:', error);
+    console.warn(`[voiceover:${jobId}] UnrealSpeech unavailable, using Google TTS fallback`, error);
     return generateVoiceoverWithGoogleTts(text, jobId);
   }
 }
@@ -206,13 +296,13 @@ export async function generateImage(prompt: string, jobId: string, sceneIdx: num
   try {
     return await withKeyFailover('workers-ai', async (key) => {
       const response = await axios.post(
-        `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/black-forest-labs/flux-2-dev`,
+        `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/black-forest-labs/flux-1-schnell`,
         {
           prompt,
+          steps: 6,
         },
         {
-          headers: { Authorization: `Bearer ${key.key}` },
-          responseType: 'arraybuffer',
+          headers: { Authorization: `Bearer ${key.key}`, 'Content-Type': 'application/json' },
           timeout: 60_000,
         }
       );
@@ -220,7 +310,13 @@ export async function generateImage(prompt: string, jobId: string, sceneIdx: num
       const dir = path.join(process.cwd(), 'database/assets/images', jobId);
       await fs.ensureDir(dir);
       const filePath = path.join(dir, `scene_${sceneIdx}.png`);
-      await fs.writeFile(filePath, response.data);
+
+      const base64 = response?.data?.result?.image || response?.data?.image;
+      if (!base64 || typeof base64 !== 'string') {
+        throw new Error(`Workers AI response missing image payload: ${JSON.stringify(response?.data || {})}`);
+      }
+
+      await fs.writeFile(filePath, Buffer.from(base64, 'base64'));
       return filePath;
     });
   } catch (error) {
@@ -314,29 +410,57 @@ async function getAudioDurationSec(audioPath: string): Promise<number> {
   });
 }
 
-function buildSubtitleFilters(lines: string[], totalDurationSec: number) {
-  if (process.env.ENABLE_VIDEO_SUBTITLES !== 'true') {
-    return [] as string[];
-  }
+function sanitizeSubtitleLine(line: string) {
+  return line
+    .replace(/[‘’]/g, "'")
+    .replace(/[–—‑]/g, '-')
+    .replace(/[^a-zA-Z0-9\s.,!?'-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
+function toAssTime(seconds: number) {
+  const total = Math.max(0, seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = Math.floor(total % 60);
+  const cs = Math.floor((total - Math.floor(total)) * 100);
+  return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
+}
+
+async function buildSubtitleFilters(lines: string[], totalDurationSec: number, jobId: string) {
   if (lines.length === 0 || totalDurationSec <= 0) return [] as string[];
 
   const perScene = Math.max(totalDurationSec / lines.length, 0.5);
-  const filters: string[] = [];
+  const safeLines = lines.map(sanitizeSubtitleLine).filter(Boolean);
+  if (!safeLines.length) return [] as string[];
 
-  lines.forEach((line, i) => {
-    const start = Number((i * perScene).toFixed(2));
-    const end = Number(((i + 1) * perScene).toFixed(2));
-    const input = i === 0 ? '[v0]' : `[v_sub_${i - 1}]`;
-    const output = `[v_sub_${i}]`;
-    const text = escapeForDrawText(line);
+  const assPath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.ass`);
+  const assLines = [
+    '[Script Info]',
+    'ScriptType: v4.00+',
+    'PlayResX: 1080',
+    'PlayResY: 1920',
+    '',
+    '[V4+ Styles]',
+    'Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding',
+    'Style: Viral,Arial,54,&H00FFFFFF,&H000000FF,&H00000000,&H66000000,1,0,0,0,100,100,0,0,3,2,0,2,60,60,80,1',
+    '',
+    '[Events]',
+    'Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text',
+  ];
 
-    filters.push(
-      `${input}drawbox=x=40:y=h-360:w=w-80:h=260:color=black@0.35:t=fill,drawtext=text='${text}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=h-250:enable='between(t,${start},${end})'${output}`
-    );
+  safeLines.forEach((line, i) => {
+    const start = toAssTime(i * perScene);
+    const end = toAssTime((i + 1) * perScene);
+    const text = line.replace(/,/g, '\\,').replace(/\{/g, '(').replace(/\}/g, ')');
+    assLines.push(`Dialogue: 0,${start},${end},Viral,,0,0,0,,${text}`);
   });
 
-  return filters;
+  await fs.writeFile(assPath, assLines.join('\n'), 'utf8');
+
+  const escapedPath = assPath.replace(/\\/g, '/').replace(/:/g, '\\:');
+  return [`[v0]subtitles='${escapedPath}'[v_sub_0]`];
 }
 
 export async function assembleVideo(jobId: string, audioPath: string, imagePaths: string[], subtitleLines: string[]) {
@@ -347,7 +471,7 @@ export async function assembleVideo(jobId: string, audioPath: string, imagePaths
     `concat=n=${imagePaths.length}:v=1:a=0[v]`,
     `[v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v0]`,
   ];
-  const subtitleFilters = buildSubtitleFilters(subtitleLines, totalDurationSec);
+  const subtitleFilters = await buildSubtitleFilters(subtitleLines, totalDurationSec, jobId);
   const allFilters = [...baseFilters, ...subtitleFilters];
   const outputLabel = subtitleFilters.length ? `[v_sub_${subtitleFilters.length - 1}]` : '[v0]';
 
@@ -388,8 +512,9 @@ export async function cleanupJobAssets(jobId: string) {
   const audioPath = path.join(process.cwd(), 'database/assets/audio', `${jobId}.mp3`);
   const imageDir = path.join(process.cwd(), 'database/assets/images', jobId);
   const videoPath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.mp4`);
+  const subtitlePath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.ass`);
 
-  await Promise.all([fs.remove(audioPath), fs.remove(imageDir), fs.remove(videoPath)]);
+  await Promise.all([fs.remove(audioPath), fs.remove(imageDir), fs.remove(videoPath), fs.remove(subtitlePath)]);
 }
 
 export async function cleanupPostImageAsset(imagePath: string) {

@@ -113,6 +113,16 @@ export const api = {
     await client.post('/settings', { ...settings, catboxHash: hash });
   },
 
+  saveFacebookCommentUrl: async (url: string): Promise<void> => {
+    const settings = await client.get('/settings').then(r => r.data);
+    await client.post('/settings', { ...settings, facebookCommentUrl: url });
+  },
+
+  getFacebookCommentUrl: async (): Promise<string> => {
+    const res = await client.get('/settings');
+    return res.data.facebookCommentUrl || '';
+  },
+
   deleteCatboxHash: async (): Promise<void> => {
     await client.delete('/settings/catbox');
   },

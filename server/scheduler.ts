@@ -12,6 +12,7 @@ import {
   generatePostImageWithTitleOverlay,
   cleanupPostImageAsset,
   generateFacebookComment,
+  rewriteTopicForVideo,
 } from './services/videoService';
 import { postCommentToFacebook, postPhotoToFacebook, postVideoToFacebook } from './services/facebookService';
 import { getActiveKeys, resolveCloudflareAccountId } from './services/keyService';
@@ -227,13 +228,15 @@ export async function runJob(schedule: Schedule) {
     const topic = await withStage(schedule, 'topic_selection', async () => getUniqueTopic(schedule.niche, topicDiscovery.topics));
     if (!topic) throw new Error('No unique topics found');
 
-    await logEvent(schedule.type, 'info', `selected_topic=${topic}`, schedule.niche);
-    await updateSchedule(schedule.id, schedule.type, { lastTopic: topic });
+    const selectedTopic = schedule.type === 'video' ? await withStage(schedule, 'topic_rewrite', async () => rewriteTopicForVideo(schedule.niche, topic)) : topic;
+
+    await logEvent(schedule.type, 'info', `selected_topic=${selectedTopic}`, schedule.niche);
+    await updateSchedule(schedule.id, schedule.type, { lastTopic: selectedTopic });
 
     if (schedule.type === 'video') {
-      await runVideoPipeline(schedule, topic);
+      await runVideoPipeline(schedule, selectedTopic);
     } else {
-      await runPostPipeline(schedule, topic);
+      await runPostPipeline(schedule, selectedTopic);
     }
 
     await setScheduleStatus(schedule.id, schedule.type, 'posted', { publishedAt: new Date().toISOString(), failedAt: undefined, errorMessage: '' });
@@ -279,12 +282,14 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
     throw new Error('Generated video script has no scenes');
   }
 
-  const audioPath = await withStage(schedule, 'video_voiceover_generation', async () => generateVoiceover(scriptData.script, jobId));
+  const stitchedScript = [scriptData.hook, scriptData.script, scriptData.preCtaScene?.text, scriptData.cta].filter(Boolean).join(' ');
+  const audioPath = await withStage(schedule, 'video_voiceover_generation', async () => generateVoiceover(stitchedScript, jobId));
 
+  const scenePlan = [...scriptData.scenes, scriptData.preCtaScene, { text: scriptData.cta, imagePrompt: `Topic-aware call to action visual for ${topic}, dynamic social media ending frame, no text, no logo, vertical 9:16` }].filter(Boolean);
   const imagePaths: string[] = [];
   await withStage(schedule, 'video_scene_image_generation', async () => {
-    for (let i = 0; i < scriptData.scenes.length; i++) {
-      const prompt = `${scriptData.scenes[i].imagePrompt}. Vertical 9:16 composition. No text, words, watermarks, logos.`;
+    for (let i = 0; i < scenePlan.length; i++) {
+      const prompt = `${scenePlan[i].imagePrompt}. Vertical 9:16 composition. No text, words, watermarks, logos.`;
       const imgPath = await generateImage(prompt, jobId, i);
       imagePaths.push(imgPath);
     }
@@ -295,7 +300,7 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
       jobId,
       audioPath,
       imagePaths,
-      scriptData.scenes.map((s: any) => String(s?.text || '').trim()).filter(Boolean)
+      scenePlan.map((s: any) => String(s?.text || '').trim()).filter(Boolean)
     )
   );
 
@@ -304,10 +309,18 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
   await withStage(schedule, 'video_publish_facebook', async () => {
     const description = `${scriptData.caption}\n\n${scriptData.hashtags}`;
     const fbResult = await postVideoToFacebook(schedule.pageId, videoUrl, description);
+    const publishTargetId = String((fbResult as any)?.post_id || (fbResult as any)?.id || '');
 
     const settings = await readJson<any>(PATHS.settings);
     const comment = await generateFacebookComment(scriptData.title, scriptData.caption, topic, settings?.facebookCommentUrl || '');
-    await postCommentToFacebook(schedule.pageId, fbResult.id, comment);
+
+    if (publishTargetId) {
+      try {
+        await postCommentToFacebook(schedule.pageId, publishTargetId, comment);
+      } catch (error: any) {
+        await logEvent(schedule.type, 'error', `comment_publish_failed id=${schedule.id} message=${error?.message || error}`, schedule.niche);
+      }
+    }
 
     await updateJson(PATHS.content.published_videos, (data: any[]) => [
       {
@@ -317,7 +330,7 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
         niche: schedule.niche,
         postedAt: new Date().toISOString(),
         status: 'published',
-        facebookUrl: `https://facebook.com/${fbResult.id}`,
+        facebookUrl: publishTargetId ? `https://facebook.com/${publishTargetId}` : '',
         caption: scriptData.caption,
         hashtags: scriptData.hashtags,
       },
