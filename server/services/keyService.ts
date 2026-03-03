@@ -1,5 +1,6 @@
 import { ApiKey } from '../../src/types';
-import { listApiKeys, patchApiKey } from './supabaseKeyStore';
+import { getKeyValueByTypeAndName, listApiKeys, patchApiKey } from './supabaseKeyStore';
+import { readJson, PATHS } from '../db';
 
 const providerRotationOffsets: Record<ApiKey['provider'], number> = {
 
@@ -102,4 +103,24 @@ export async function updateKey(id: string, provider: ApiKey['provider'], update
 
   const updated = updater(current);
   await patchApiKey(provider, id, updated);
+}
+
+export async function resolveCloudflareAccountId(): Promise<string | null> {
+  const fromEnv = (process.env.CLOUDFLARE_ACCOUNT_ID || '').trim();
+  if (fromEnv) return fromEnv;
+
+  const settings = await readJson<any>(PATHS.settings);
+  const fromSettings = String(settings?.cloudflareAccountId || '').trim();
+  if (fromSettings) return fromSettings;
+
+
+  const fromConfigRow = String((await getKeyValueByTypeAndName('config', 'CLOUDFLARE_ACCOUNT_ID')) || '').trim();
+  if (fromConfigRow) return fromConfigRow;
+
+  const workersKeys = await getActiveKeys('workers-ai');
+  const fromKeyLabel = workersKeys
+    .map((k) => String(k.name || '').trim())
+    .find((name) => /^[a-f0-9]{32}$/i.test(name));
+
+  return fromKeyLabel || null;
 }
