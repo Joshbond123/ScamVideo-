@@ -36,6 +36,7 @@ export default function Settings() {
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [pages, setPages] = useState<FacebookPage[]>([]);
   const [catboxHash, setCatboxHash] = useState('');
+  const [facebookCommentUrl, setFacebookCommentUrl] = useState('');
   const [showCatboxHash, setShowCatboxHash] = useState(false);
 
   const [addProvider, setAddProvider] = useState<ApiKey['provider'] | null>(null);
@@ -73,16 +74,18 @@ export default function Settings() {
   async function loadAll() {
     setLoading(true);
     try {
-      const [k1, k2, k3, fbPages, hash] = await Promise.all([
+      const [k1, k2, k3, fbPages, hash, commentUrl] = await Promise.all([
         api.getKeys('cerebras'),
         api.getKeys('unrealspeech'),
         api.getKeys('workers-ai'),
         api.getFacebookPages(),
         api.getCatboxHash(),
+        api.getFacebookCommentUrl(),
       ]);
       setKeys([...(k1 || []), ...(k2 || []), ...(k3 || [])]);
       setPages(Array.isArray(fbPages) ? fbPages : []);
       setCatboxHash(typeof hash === 'string' ? hash : '');
+      setFacebookCommentUrl(typeof commentUrl === 'string' ? commentUrl : '');
     } catch (error) {
       console.error(error);
       showError(error, 'Failed to load settings.');
@@ -232,6 +235,17 @@ export default function Settings() {
     } catch (error) {
       console.error(error);
       showError(error, 'Failed to delete Catbox hash.');
+    }
+  }
+
+  async function onSaveFacebookCommentUrl() {
+    try {
+      await api.saveFacebookCommentUrl(facebookCommentUrl.trim());
+      await loadAll();
+      showSuccess('Facebook comment URL saved successfully.');
+    } catch (error) {
+      console.error(error);
+      showError(error, 'Failed to save Facebook comment URL.');
     }
   }
 
@@ -481,7 +495,7 @@ export default function Settings() {
       )}
 
       {tab === 'catbox' && (
-        <Card className="p-5 space-y-3 max-w-2xl">
+        <Card className="p-5 space-y-5 max-w-2xl">
           <Label>Catbox User Hash</Label>
           <div className="relative">
             <Input
@@ -504,6 +518,21 @@ export default function Settings() {
               Delete
             </Button>
             <Button onClick={() => void onSaveCatbox()}>Save</Button>
+          </div>
+
+          <div className="border-t pt-4 space-y-2">
+            <Label>Facebook Comment CTA URL</Label>
+            <Input
+              value={facebookCommentUrl}
+              onChange={(e) => setFacebookCommentUrl(e.target.value)}
+              placeholder="https://example.com/report"
+            />
+            <p className="text-xs text-slate-500">
+              Used in auto-generated Facebook comments. If blank, no link is appended.
+            </p>
+            <div className="flex justify-end">
+              <Button onClick={() => void onSaveFacebookCommentUrl()}>Save Comment URL</Button>
+            </div>
           </div>
         </Card>
       )}

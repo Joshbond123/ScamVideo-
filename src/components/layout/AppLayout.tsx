@@ -23,7 +23,7 @@ const navItems = [
   { icon: Video, label: 'Schedule Video', href: '/schedule/video' },
   { icon: FileText, label: 'Schedule Post', href: '/schedule/post' },
   { icon: CheckCircle, label: 'Published', href: '/content/published' },
-  { icon: History, label: 'Logs', href: '/logs' },
+  { icon: History, label: 'Recent Schedules', href: '/recent-schedules' },
   { icon: Settings, label: 'Settings', href: '/settings' },
 ];
 
