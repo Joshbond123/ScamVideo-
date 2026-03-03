@@ -14,6 +14,8 @@ export interface Schedule {
   startedAt?: string;
   publishedAt?: string;
   failedAt?: string;
+  lastHeartbeatAt?: string;
+  currentStage?: string;
   errorMessage?: string;
   lastTopic?: string;
   generatedTitle?: string;

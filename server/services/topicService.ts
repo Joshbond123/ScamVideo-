@@ -139,6 +139,7 @@ function stripTrailingSource(title: string): string {
 
 function extractRssTitles(xml: string): string[] {
   const titles: string[] = [];
+  const sourceUrls: string[] = [];
   const regex = /<title><!\[CDATA\[(.*?)\]\]><\/title>|<title>(.*?)<\/title>/gis;
   let match: RegExpExecArray | null;
 
@@ -164,9 +165,10 @@ async function fetchRssTitles(url: string): Promise<string[]> {
   return extractRssTitles(String(response.data || ''));
 }
 
-export async function discoverTopics(niche: string): Promise<{ topics: string[]; source: string }> {
+export async function discoverTopics(niche: string): Promise<{ topics: string[]; source: string; sourceUrls: string[] }> {
   const queries = NICHE_QUERIES[niche] || [];
   const titles: string[] = [];
+  const sourceUrls: string[] = [];
 
   for (const query of queries) {
     const encoded = encodeURIComponent(query);
@@ -178,6 +180,7 @@ export async function discoverTopics(niche: string): Promise<{ topics: string[];
     for (const feedUrl of feeds) {
       try {
         const feedTitles = await fetchRssTitles(feedUrl);
+        if (feedTitles.length) sourceUrls.push(feedUrl);
         titles.push(...feedTitles);
       } catch (error: any) {
         console.warn('Free web topic fetch failed:', feedUrl, error?.response?.status || error?.message || error);
@@ -186,7 +189,7 @@ export async function discoverTopics(niche: string): Promise<{ topics: string[];
   }
 
   const topics = dedupeTopics(titles).slice(0, 50);
-  return { topics, source: 'free-web-rss' };
+  return { topics, source: 'free-web-rss', sourceUrls };
 }
 
 export async function getUniqueTopic(niche: string, candidates: string[]): Promise<string | null> {
