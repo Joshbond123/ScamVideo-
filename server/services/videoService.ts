@@ -6,7 +6,6 @@ import { resolveCloudflareAccountId, withKeyFailover } from './keyService';
 import { readJson, PATHS } from '../db';
 import { deleteSupabaseAssets, pruneSupabaseTempAssets, renderVideoViaSupabaseFunction } from './supabaseStorage';
 
-
 type GeneratedScript = {
   title: string;
   hook: string;
@@ -18,6 +17,16 @@ type GeneratedScript = {
   hashtags: string;
 };
 
+type VoiceTimingWord = { word: string; start: number; end: number };
+type VoiceoverMeta = {
+  voiceId: string;
+  timingSource: string;
+  words: VoiceTimingWord[];
+  durationSec: number;
+};
+
+const UNREAL_VOICES = ['Oliver', 'Noah', 'Ethan', 'Daniel'];
+const voiceMetaByJob = new Map<string, VoiceoverMeta>();
 
 function extractJsonObject(raw: string) {
   const trimmed = raw.trim();
@@ -47,6 +56,7 @@ async function runCerebrasJson(systemPrompt: string, userPrompt: string) {
       },
       {
         headers: { Authorization: `Bearer ${key.key}` },
+        timeout: 120_000,
       }
     );
 
@@ -70,25 +80,20 @@ function normalizeScriptPayload(payload: any, topic: string): GeneratedScript {
         .filter((s: any) => s.text && s.imagePrompt)
     : [];
 
-  const baseScenes = scenes.slice(0, 8);
-  const preCtaScene = {
-    text:
-      String(payload?.preCtaScene?.text || '').trim() ||
-      `If you already sent crypto in this ${topic} scam pattern, check our link in bio or pinned comment to report the case and start your recovery review.`,
-    imagePrompt:
-      String(payload?.preCtaScene?.imagePrompt || '').trim() ||
-      'Concerned crypto scam victim speaking with a cybercrime support specialist in a modern office, cinematic lighting, vertical composition, no text',
-  };
-
   return {
     title: String(payload?.title || topic).trim(),
     hook: String(payload?.hook || '').trim(),
     script: String(payload?.script || '').trim(),
-    scenes: baseScenes,
-    preCtaScene,
-    cta:
-      String(payload?.cta || '').trim() ||
-      'Follow for scam alerts, like if this helped, and share this video to protect more people.',
+    scenes: scenes.slice(0, 8),
+    preCtaScene: {
+      text:
+        String(payload?.preCtaScene?.text || '').trim() ||
+        'If you already sent crypto to scammers, check our link in bio or pinned comment to report your case and start your recovery review.',
+      imagePrompt:
+        String(payload?.preCtaScene?.imagePrompt || '').trim() ||
+        'Concerned crypto scam victim speaking with a cybercrime support specialist in a modern office, cinematic lighting, vertical composition, no text',
+    },
+    cta: String(payload?.cta || '').trim() || 'Follow for scam alerts, like this video, and share to protect more people from crypto scams.',
     caption: String(payload?.caption || '').trim(),
     hashtags: String(payload?.hashtags || '').trim(),
   };
@@ -97,18 +102,7 @@ function normalizeScriptPayload(payload: any, topic: string): GeneratedScript {
 export async function generateScript(niche: string, topic: string): Promise<GeneratedScript> {
   const payload = await runCerebrasJson(
     'You create high-retention short-form anti-scam video scripts for Facebook. Return strict JSON only.',
-    `Current date: ${new Date().toISOString()}\nNiche: ${niche}\nTrending topic: ${topic}\n
-Return JSON exactly as:\n{
-  "title": "",
-  "hook": "",
-  "script": "",
-  "scenes": [{"text":"","imagePrompt":""}],
-  "preCtaScene": {"text":"","imagePrompt":""},
-  "cta": "",
-  "caption": "",
-  "hashtags": ""
-}\n
-Rules:\n- scenes: 6-8 entries, each vivid, factual, dynamic, no placeholders.\n- Add one professional preCtaScene specifically telling victims who sent crypto to scammers to check link in bio/comments to report case and recover lost crypto.\n- cta must be topic-based and ONLY ask viewers to follow, like, and share.\n- imagePrompt must request cinematic vertical 9:16 visuals and explicitly say no text/watermarks/logos.\n- hashtags: exactly 5.`
+    `Current date: ${new Date().toISOString()}\nNiche: ${niche}\nTrending topic: ${topic}\n\nReturn JSON exactly as:\n{\n  "title": "",\n  "hook": "",\n  "script": "",\n  "scenes": [{"text":"","imagePrompt":""}],\n  "preCtaScene": {"text":"","imagePrompt":""},\n  "cta": "",\n  "caption": "",\n  "hashtags": ""\n}\n\nRules:\n- scenes: 6-8 entries, each vivid, factual, dynamic, no placeholders.\n- Add one professional preCtaScene specifically telling victims who sent crypto to scammers to check link in bio/comments to report case and recover lost crypto.\n- cta must ask viewers to follow, like, and share.\n- imagePrompt must request cinematic vertical 9:16 visuals and explicitly say no text/watermarks/logos.\n- hashtags: exactly 5.`
   );
 
   return normalizeScriptPayload(payload, topic);
@@ -124,7 +118,7 @@ export async function generateFacebookComment(title: string, caption: string, to
           {
             role: 'system',
             content:
-              'Write one concise Facebook comment (35-75 words), factual and engaging, tied to topic/title. Professional tone. No markdown. No hashtags. Mention no upfront fees. Only the final CTA sentence may mention scam victims reporting their case via link if a URL is provided.',
+              'Write one concise Facebook comment (35-75 words), factual and engaging, tied to topic/title. Professional tone. No markdown. No hashtags. Mention no upfront fees. Final sentence should guide crypto scam victims to report via provided link if available.',
           },
           {
             role: 'user',
@@ -134,6 +128,7 @@ export async function generateFacebookComment(title: string, caption: string, to
       },
       {
         headers: { Authorization: `Bearer ${key.key}` },
+        timeout: 120_000,
       }
     );
 
@@ -144,109 +139,133 @@ export async function generateFacebookComment(title: string, caption: string, to
   return `${base}\n\nIf you already sent crypto to scammers, use this link to report your case: ${appendUrl}`;
 }
 
-
-function chunkTextForTts(text: string, maxLen = 180) {
-  const words = text.split(/\s+/).filter(Boolean);
-  const chunks: string[] = [];
-  let current = '';
-
-  for (const word of words) {
-    const next = current ? `${current} ${word}` : word;
-    if (next.length <= maxLen) {
-      current = next;
-      continue;
-    }
-
-    if (current) chunks.push(current);
-    current = word;
-  }
-
-  if (current) chunks.push(current);
-  return chunks.length ? chunks : [text.slice(0, maxLen)];
+function normalizeWordTimings(raw: any): VoiceTimingWord[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((entry: any) => {
+      const word = String(entry?.word || entry?.text || '').trim();
+      const start = Number(entry?.start ?? entry?.start_time ?? entry?.from ?? entry?.offset);
+      const end = Number(entry?.end ?? entry?.end_time ?? entry?.to ?? (Number.isFinite(start) ? start + Number(entry?.duration || 0) : NaN));
+      if (!word || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
+      return { word, start, end };
+    })
+    .filter(Boolean) as VoiceTimingWord[];
 }
 
-async function generateVoiceoverWithGoogleTts(text: string, jobId: string) {
-  const outputPath = path.join(process.cwd(), 'database/assets/audio', `${jobId}.mp3`);
-  const partsDir = path.join(process.cwd(), 'database/assets/audio', `${jobId}_parts`);
-  await fs.ensureDir(partsDir);
+function chooseRandomVoice() {
+  return UNREAL_VOICES[Math.floor(Math.random() * UNREAL_VOICES.length)];
+}
 
-  const chunks = chunkTextForTts(text);
-  const partBuffers: Buffer[] = [];
+function toAssTime(seconds: number) {
+  const total = Math.max(0, seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = Math.floor(total % 60);
+  const cs = Math.floor((total - Math.floor(total)) * 100);
+  return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
+}
 
-  for (let i = 0; i < chunks.length; i++) {
-    const chunk = chunks[i];
-    const response = await axios.get('https://translate.google.com/translate_tts', {
-      params: {
-        ie: 'UTF-8',
-        client: 'tw-ob',
-        tl: 'en',
-        q: chunk,
-      },
-      responseType: 'arraybuffer',
-      headers: {
-        'User-Agent': 'Mozilla/5.0',
-      },
-      timeout: 30_000,
+function buildSubtitleEventsFromWords(words: VoiceTimingWord[]) {
+  const events: Array<{ text: string; start: number; end: number }> = [];
+  for (let i = 0; i < words.length; i += 3) {
+    const chunk = words.slice(i, i + 3);
+    events.push({
+      text: chunk.map((w) => w.word).join(' '),
+      start: chunk[0].start,
+      end: chunk[chunk.length - 1].end,
     });
+  }
+  return events;
+}
 
-    partBuffers.push(Buffer.from(response.data));
+async function writeAssSubtitle(jobId: string, events: Array<{ text: string; start: number; end: number }>) {
+  const assPath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.ass`);
+  await fs.ensureDir(path.dirname(assPath));
+
+  const ass = [
+    '[Script Info]',
+    'ScriptType: v4.00+',
+    'PlayResX: 1080',
+    'PlayResY: 1920',
+    '',
+    '[V4+ Styles]',
+    'Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding',
+    'Style: Viral,Arial,58,&H00FFFFFF,&H0000FFFF,&H00332200,&H66000000,1,0,0,0,100,100,0,0,3,3,0,2,60,60,120,1',
+    '',
+    '[Events]',
+    'Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text',
+  ];
+
+  for (const ev of events) {
+    const safe = ev.text.replace(/,/g, '\\,').replace(/\{/g, '(').replace(/\}/g, ')');
+    ass.push(`Dialogue: 0,${toAssTime(ev.start)},${toAssTime(ev.end)},Viral,,0,0,0,,${safe}`);
   }
 
-  const outputBuffer = Buffer.concat(partBuffers);
-  await fs.writeFile(outputPath, outputBuffer);
-
-  await fs.remove(partsDir);
-  return outputPath;
+  await fs.writeFile(assPath, ass.join('\n'), 'utf8');
+  return assPath;
 }
 
 export async function generateVoiceover(text: string, jobId: string) {
   const filePath = path.join(process.cwd(), 'database/assets/audio', `${jobId}.mp3`);
+  await fs.ensureDir(path.dirname(filePath));
 
-  try {
-    return await withKeyFailover('unrealspeech', async (key) => {
-      const endpoints = ['https://api.v7.unrealspeech.com/stream', 'https://api.unrealspeech.com/stream'];
-      let lastError: unknown;
+  const voiceId = chooseRandomVoice();
 
-      for (const endpoint of endpoints) {
-        try {
-          const response = await axios.post(
-            endpoint,
-            {
-              Text: text,
-              VoiceId: 'Will',
-              Bitrate: '192k',
-              OutputFormat: 'mp3',
-              Speed: 0,
-              Pitch: 1,
-            },
-            {
-              headers: {
-                Authorization: `Bearer ${key.key}`,
-                Accept: 'audio/mpeg,application/octet-stream,*/*',
-              },
-              responseType: 'arraybuffer',
-              timeout: 60_000,
-            }
-          );
-
-          const buffer = Buffer.from(response.data || []);
-          if (!buffer.length) throw new Error('UnrealSpeech returned empty audio payload');
-          await fs.writeFile(filePath, buffer);
-          return filePath;
-        } catch (error) {
-          lastError = error;
-        }
+  const out = await withKeyFailover('unrealspeech', async (key) => {
+    const response = await axios.post(
+      'https://api.v8.unrealspeech.com/speech',
+      {
+        Text: text,
+        VoiceId: voiceId,
+        Bitrate: '192k',
+        OutputFormat: 'mp3',
+        TimestampType: 'word',
+        Speed: -0.05,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${key.key}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 120_000,
       }
+    );
 
-      throw lastError instanceof Error ? lastError : new Error('UnrealSpeech request failed');
-    });
-  } catch (error) {
-    console.warn(`[voiceover:${jobId}] UnrealSpeech unavailable, using Google TTS fallback`, error);
-    return generateVoiceoverWithGoogleTts(text, jobId);
-  }
+    const audioUrl = String(response.data?.AudioUrl || response.data?.audio_url || response.data?.OutputUri || '');
+    const timestampsUri = String(response.data?.TimestampsUri || response.data?.timestamps_uri || '');
+    let timings = normalizeWordTimings(response.data?.Timestamps || response.data?.timestamps || response.data?.word_timestamps || []);
+
+    if (!audioUrl) throw new Error(`UnrealSpeech response missing audio URL: ${JSON.stringify(response.data || {})}`);
+
+    if (!timings.length && timestampsUri) {
+      const tsResp = await axios.get(timestampsUri, { timeout: 120_000 });
+      timings = normalizeWordTimings(tsResp.data?.timestamps || tsResp.data?.words || tsResp.data || []);
+    }
+
+    if (!timings.length) throw new Error(`UnrealSpeech response missing word timestamps: ${JSON.stringify(response.data || {})}`);
+
+    const audioResp = await axios.get(audioUrl, { responseType: 'arraybuffer', timeout: 120_000 });
+    await fs.writeFile(filePath, Buffer.from(audioResp.data));
+
+    return {
+      filePath,
+      voiceId,
+      words: timings,
+      timingSource: timestampsUri ? 'unrealspeech_timestamps_uri' : 'unrealspeech_word_timestamps',
+      durationSec: Number(timings[timings.length - 1].end || 0),
+    };
+  });
+
+  voiceMetaByJob.set(jobId, {
+    voiceId: out.voiceId,
+    words: out.words,
+    timingSource: out.timingSource,
+    durationSec: out.durationSec,
+  });
+
+  console.info(`[voiceover:${jobId}] selected_voice=${out.voiceId} timing_source=${out.timingSource} words=${out.words.length} duration_sec=${out.durationSec.toFixed(2)}`);
+  return out.filePath;
 }
-
-
 
 async function generateLocalPlaceholderImage(jobId: string, sceneIdx: number) {
   const dir = path.join(process.cwd(), 'database/assets/images', jobId);
@@ -326,7 +345,6 @@ export async function addTitleOverlayToImage(imagePath: string, _title: string) 
   return imagePath;
 }
 
-
 export async function generatePostImageWithTitleOverlay(prompt: string, title: string, jobId: string) {
   const cleanPrompt = `${prompt}. No text, letters, words, logo, watermark, typography.`;
   const imagePath = await generateImage(cleanPrompt, jobId, 0);
@@ -335,10 +353,31 @@ export async function generatePostImageWithTitleOverlay(prompt: string, title: s
 
 export async function assembleVideo(jobId: string, audioPath: string, imagePaths: string[], subtitleLines: string[]) {
   console.info(`[render:${jobId}] render_provider=supabase_only`);
-  const remote = await renderVideoViaSupabaseFunction({ jobId, audioPath, imagePaths, subtitleLines });
+
+  const meta = voiceMetaByJob.get(jobId);
+  if (!meta?.words?.length) {
+    throw new Error(`[render:${jobId}] missing UnrealSpeech timing metadata; cannot render synchronized subtitles`);
+  }
+
+  const subtitleEvents = buildSubtitleEventsFromWords(meta.words);
+  const subtitleAssPath = await writeAssSubtitle(jobId, subtitleEvents);
+  console.info(`[render:${jobId}] subtitle_file=${subtitleAssPath} subtitle_events=${subtitleEvents.length}`);
+
+  const remote = await renderVideoViaSupabaseFunction({
+    jobId,
+    audioPath,
+    imagePaths,
+    subtitleLines,
+    subtitleEvents,
+    subtitleAss: await fs.readFile(subtitleAssPath, 'utf8'),
+    voiceoverMeta: meta,
+  });
+
   if (!remote?.localOutput) {
     throw new Error(`[render:${jobId}] render_provider=supabase_only failed: missing outputPath/localOutput`);
   }
+
+  console.info(`[render:${jobId}] subtitles_burn_step=success subtitles_burned=${String(remote.subtitlesBurned)} output=${remote.outputPath || remote.localOutput} duration_sec=${Number(remote.outputDurationSec || 0).toFixed(2)} status=${remote.renderStatus || 'unknown'}`);
   return remote.localOutput;
 }
 
@@ -365,12 +404,15 @@ export async function cleanupJobAssets(jobId: string) {
   const audioPath = path.join(process.cwd(), 'database/assets/audio', `${jobId}.mp3`);
   const imageDir = path.join(process.cwd(), 'database/assets/images', jobId);
   const videoPath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.mp4`);
-  await Promise.all([fs.remove(audioPath), fs.remove(imageDir), fs.remove(videoPath)]);
+  const subtitlePath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.ass`);
+  await Promise.all([fs.remove(audioPath), fs.remove(imageDir), fs.remove(videoPath), fs.remove(subtitlePath)]);
+  voiceMetaByJob.delete(jobId);
 
   try {
     await deleteSupabaseAssets([
       `jobs/${jobId}/audio.mp3`,
       `jobs/${jobId}/render.mp4`,
+      `jobs/${jobId}/subtitles.ass`,
       ...Array.from({ length: 16 }).map((_, idx) => `jobs/${jobId}/scene_${idx}.png`),
     ]);
   } catch (error) {

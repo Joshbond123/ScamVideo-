@@ -14,7 +14,7 @@ import {
   generateFacebookComment,
   rewriteTopicForVideo,
 } from './services/videoService';
-import { postCommentToFacebook, postPhotoToFacebook, postVideoToFacebook } from './services/facebookService';
+import { postCommentToFacebook, postPhotoToFacebook, postVideoToFacebook, verifyFacebookObjectPublished } from './services/facebookService';
 import { getActiveKeys, resolveCloudflareAccountId } from './services/keyService';
 
 const SCHEDULER_TICK_MS = 15_000;
@@ -349,7 +349,7 @@ export async function runJob(schedule: Schedule) {
       await logEvent(
         schedule.type,
         'info',
-        `topic_discovery_result source=${topicDiscovery.source} count=${topicDiscovery.topics.length}`,
+        `topic_discovery_result source=${topicDiscovery.source} count=${topicDiscovery.topics.length} urls=${JSON.stringify(topicDiscovery.sourceUrls || [])}`,
         schedule.niche
       );
 
@@ -458,9 +458,12 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
         throw new Error(`Facebook upload did not return post id: ${JSON.stringify(fbResult || {})}`);
       }
 
+      const verified = await verifyFacebookObjectPublished(schedule.pageId, publishTargetId);
+      await logEvent(schedule.type, 'info', `facebook_publish_verified id=${schedule.id} object=${verified.id} url=${verified.url}`, schedule.niche);
+
       const settings = await readJson<any>(PATHS.settings);
       const comment = await generateFacebookComment(scriptData.title, scriptData.caption, topic, settings?.facebookCommentUrl || '');
-      await postCommentToFacebook(schedule.pageId, publishTargetId, comment);
+      await postCommentToFacebook(schedule.pageId, verified.id, comment);
 
       await updateJson(PATHS.content.published_videos, (data: any[]) => [
         {
@@ -470,7 +473,7 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
           niche: schedule.niche,
           postedAt: new Date().toISOString(),
           status: 'published',
-          facebookUrl: `https://facebook.com/${publishTargetId}`,
+          facebookUrl: verified.url,
           caption: scriptData.caption,
           hashtags: scriptData.hashtags,
         },

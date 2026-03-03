@@ -111,6 +111,9 @@ export async function renderVideoViaSupabaseFunction(payload: {
   audioPath: string;
   imagePaths: string[];
   subtitleLines: string[];
+  subtitleEvents?: Array<{ text: string; start: number; end: number }>;
+  subtitleAss?: string;
+  voiceoverMeta?: { voiceId: string; timingSource: string; durationSec: number } | null;
 }) {
   const fnUrls = resolveRenderFunctionUrls();
   if (!fnUrls.length) {
@@ -120,6 +123,15 @@ export async function renderVideoViaSupabaseFunction(payload: {
   const client = makeClient();
 
   const uploadedAudio = await uploadLocalAssetToSupabase(payload.audioPath, `jobs/${payload.jobId}/audio.mp3`, 'audio/mpeg');
+
+  let uploadedSubtitleAss = '';
+  if (payload.subtitleAss) {
+    const subtitleLocal = path.join(process.cwd(), 'database/assets/videos', `${payload.jobId}.ass`);
+    await fs.ensureDir(path.dirname(subtitleLocal));
+    await fs.writeFile(subtitleLocal, payload.subtitleAss, 'utf8');
+    uploadedSubtitleAss = await uploadLocalAssetToSupabase(subtitleLocal, `jobs/${payload.jobId}/subtitles.ass`, 'text/x-ass');
+  }
+
   const uploadedImages: string[] = [];
   for (let i = 0; i < payload.imagePaths.length; i++) {
     uploadedImages.push(await uploadLocalAssetToSupabase(payload.imagePaths[i], `jobs/${payload.jobId}/scene_${i}.png`, 'image/png'));
@@ -140,6 +152,10 @@ export async function renderVideoViaSupabaseFunction(payload: {
           audioPath: uploadedAudio,
           imagePaths: uploadedImages,
           subtitleLines: payload.subtitleLines,
+          subtitleEvents: payload.subtitleEvents || [],
+          subtitleAss: payload.subtitleAss || "",
+          voiceoverMeta: payload.voiceoverMeta || null,
+          renderProvider: "supabase_only",
           outputPath: `jobs/${payload.jobId}/render.mp4`,
         },
         {
@@ -178,16 +194,20 @@ export async function renderVideoViaSupabaseFunction(payload: {
 
   const renderStatus = String(response?.data?.status || response?.data?.result?.status || 'success');
   const renderLogs = response?.data?.logs || response?.data?.result?.logs || null;
+  const outputDurationSec = Number(response?.data?.durationSec || response?.data?.result?.durationSec || 0);
+  const subtitlesBurned = Boolean(response?.data?.subtitlesBurned ?? response?.data?.result?.subtitlesBurned ?? payload.subtitleEvents?.length);
   if (renderLogs) {
     console.info(`[render:${payload.jobId}] render_provider=supabase_only render_logs=${JSON.stringify(renderLogs)}`);
   }
   return {
     localOutput,
-    tempPaths: [uploadedAudio, ...uploadedImages, renderedPath],
+    tempPaths: [uploadedAudio, ...uploadedImages, ...(uploadedSubtitleAss ? [uploadedSubtitleAss] : []), renderedPath],
     outputPath: renderedPath,
     renderProvider: "supabase_only",
     renderStatus,
     renderLogs,
     functionUrl: usedUrl,
+    outputDurationSec,
+    subtitlesBurned,
   };
 }
