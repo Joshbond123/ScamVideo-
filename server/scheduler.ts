@@ -246,8 +246,8 @@ async function processDueSchedules() {
   try {
     await Promise.all([failStaleGeneratingSchedules('video'), failStaleGeneratingSchedules('post')]);
 
-    const videoSchedules = await readJson<Schedule[]>(PATHS.schedules.video);
-    const postSchedules = await readJson<Schedule[]>(PATHS.schedules.post);
+    const videoSchedules = (await readJson<Schedule[]>(PATHS.schedules.video)).map((s) => ({ ...s, type: 'video' as const }));
+    const postSchedules = (await readJson<Schedule[]>(PATHS.schedules.post)).map((s) => ({ ...s, type: 'post' as const }));
     const pending = [...videoSchedules, ...postSchedules]
       .filter((s) => s.status === 'pending')
       .sort((a, b) => getScheduleSortTime(a) - getScheduleSortTime(b));
@@ -277,8 +277,8 @@ async function processDueSchedules() {
 
 async function computeNextWakeDelayMs(): Promise<number | null> {
   const [videoSchedules, postSchedules] = await Promise.all([
-    readJson<Schedule[]>(PATHS.schedules.video),
-    readJson<Schedule[]>(PATHS.schedules.post),
+    readJson<Schedule[]>(PATHS.schedules.video).then((rows) => rows.map((s) => ({ ...s, type: 'video' as const }))),
+    readJson<Schedule[]>(PATHS.schedules.post).then((rows) => rows.map((s) => ({ ...s, type: 'post' as const }))),
   ]);
 
   const pending = [...videoSchedules, ...postSchedules].filter((s) => s.status === 'pending');

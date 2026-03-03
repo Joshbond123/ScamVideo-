@@ -59,6 +59,41 @@ function makeClient() {
   });
 }
 
+function makeEdgeFunctionHeaders(key: string) {
+  return {
+    Authorization: `Bearer ${key}`,
+    apikey: key,
+    'Content-Type': 'application/json',
+  };
+}
+
+function normalizeStorageObjectPath(pathOrUrl: string) {
+  const trimmed = String(pathOrUrl || '').trim();
+  if (!trimmed) return '';
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  const normalized = trimmed.replace(/^\/+/, '');
+  if (normalized.startsWith(`${DEFAULT_BUCKET}/`)) {
+    return normalized.slice(DEFAULT_BUCKET.length + 1);
+  }
+  return normalized;
+}
+
+async function downloadRenderedVideo(client: ReturnType<typeof makeClient>, renderedPathOrUrl: string, jobId: string) {
+  const normalized = normalizeStorageObjectPath(renderedPathOrUrl);
+  const localOutput = path.join(process.cwd(), 'database/assets/videos', `${jobId}.mp4`);
+  await fs.ensureDir(path.dirname(localOutput));
+
+  if (/^https?:\/\//i.test(normalized)) {
+    const download = await axios.get(normalized, { responseType: 'arraybuffer', timeout: 180_000 });
+    await fs.writeFile(localOutput, Buffer.from(download.data));
+    return { localOutput, outputPath: renderedPathOrUrl };
+  }
+
+  const download = await client.get(`/object/${DEFAULT_BUCKET}/${normalized}`, { responseType: 'arraybuffer', timeout: 180_000 });
+  await fs.writeFile(localOutput, Buffer.from(download.data));
+  return { localOutput, outputPath: normalized };
+}
+
 async function ensureMediaBucket() {
   const client = makeClient();
   try {
@@ -136,7 +171,7 @@ export async function validateSupabaseRenderFunctionEndpoint() {
         fnUrl,
         { healthcheck: true },
         {
-          headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+          headers: makeEdgeFunctionHeaders(key),
           timeout: 15_000,
           validateStatus: () => true,
         }
@@ -204,13 +239,14 @@ export async function renderVideoViaSupabaseFunction(payload: {
           imagePaths: uploadedImages,
           subtitleLines: payload.subtitleLines,
           subtitleEvents: payload.subtitleEvents || [],
+          subtitleAssPath: uploadedSubtitleAss || "",
           subtitleAss: payload.subtitleAss || "",
           voiceoverMeta: payload.voiceoverMeta || null,
           renderProvider: "supabase_only",
           outputPath: `jobs/${payload.jobId}/render.mp4`,
         },
         {
-          headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+          headers: makeEdgeFunctionHeaders(key),
           timeout: 600_000,
         }
       );
@@ -232,15 +268,12 @@ export async function renderVideoViaSupabaseFunction(payload: {
     throw new Error(`Supabase render function unavailable. Tried URLs: ${fnUrls.join(', ')}. Last error: ${lastError?.message || lastError}`);
   }
 
-  const renderedPath = (response?.data?.outputPath || response?.data?.result?.outputPath) as string | undefined;
+  const renderedPath = (response?.data?.outputPath || response?.data?.result?.outputPath || response?.data?.url || response?.data?.result?.url || response?.data?.signedUrl || response?.data?.result?.signedUrl) as string | undefined;
   if (!renderedPath) {
     throw new Error(`Supabase render function response missing outputPath: ${JSON.stringify(response?.data || {})}`);
   }
 
-  const download = await client.get(`/object/${DEFAULT_BUCKET}/${renderedPath}`, { responseType: 'arraybuffer' });
-  const localOutput = path.join(process.cwd(), 'database/assets/videos', `${payload.jobId}.mp4`);
-  await fs.ensureDir(path.dirname(localOutput));
-  await fs.writeFile(localOutput, Buffer.from(download.data));
+  const { localOutput, outputPath } = await downloadRenderedVideo(client, renderedPath, payload.jobId);
 
 
   const renderStatus = String(response?.data?.status || response?.data?.result?.status || 'success');
@@ -252,8 +285,8 @@ export async function renderVideoViaSupabaseFunction(payload: {
   }
   return {
     localOutput,
-    tempPaths: [uploadedAudio, ...uploadedImages, ...(uploadedSubtitleAss ? [uploadedSubtitleAss] : []), renderedPath],
-    outputPath: renderedPath,
+    tempPaths: [uploadedAudio, ...uploadedImages, ...(uploadedSubtitleAss ? [uploadedSubtitleAss] : []), outputPath],
+    outputPath,
     renderProvider: "supabase_only",
     renderStatus,
     renderLogs,
