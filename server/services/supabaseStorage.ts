@@ -4,11 +4,22 @@ import path from 'path';
 
 const DEFAULT_BUCKET = process.env.SUPABASE_MEDIA_BUCKET || 'temp-media';
 
-function resolveRenderFunctionUrl() {
-  if (process.env.SUPABASE_RENDER_FUNCTION_URL) return process.env.SUPABASE_RENDER_FUNCTION_URL;
+function resolveRenderFunctionUrls() {
+  const configured = process.env.SUPABASE_RENDER_FUNCTION_URL;
+  if (configured) {
+    if (configured.includes(',')) {
+      return configured
+        .split(',')
+        .map((x) => x.trim())
+        .filter(Boolean);
+    }
+    return [configured.trim()];
+  }
+
   const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
-  if (!url) return '';
-  return `${url.replace(/\/$/, '')}/functions/v1/render-video`;
+  if (!url) return [] as string[];
+  const base = `${url.replace(/\/$/, '')}/functions/v1`;
+  return [`${base}/render-video`, `${base}/video-render`, `${base}/render`];
 }
 
 type StorageFile = {
@@ -34,7 +45,21 @@ function makeClient() {
   });
 }
 
+async function ensureMediaBucket() {
+  const client = makeClient();
+  try {
+    await client.get(`/bucket/${DEFAULT_BUCKET}`);
+  } catch (error: any) {
+    if (error?.response?.status === 404 || error?.response?.data?.error === 'Bucket not found') {
+      await client.post('/bucket', { id: DEFAULT_BUCKET, name: DEFAULT_BUCKET, public: false });
+      return;
+    }
+    throw error;
+  }
+}
+
 export async function uploadLocalAssetToSupabase(localPath: string, remotePath: string, contentType: string) {
+  await ensureMediaBucket();
   const client = makeClient();
   const bytes = await fs.readFile(localPath);
   await client.post(`/object/${DEFAULT_BUCKET}/${remotePath}`, bytes, {
@@ -87,8 +112,10 @@ export async function renderVideoViaSupabaseFunction(payload: {
   imagePaths: string[];
   subtitleLines: string[];
 }) {
-  const fnUrl = resolveRenderFunctionUrl();
-  if (!fnUrl) return null;
+  const fnUrls = resolveRenderFunctionUrls();
+  if (!fnUrls.length) {
+    throw new Error('Supabase render function URL is not configured');
+  }
 
   const client = makeClient();
 
@@ -99,21 +126,42 @@ export async function renderVideoViaSupabaseFunction(payload: {
   }
 
   const { key } = getConfig();
-  const response = await axios.post(
-    fnUrl,
-    {
-      jobId: payload.jobId,
-      bucket: DEFAULT_BUCKET,
-      audioPath: uploadedAudio,
-      imagePaths: uploadedImages,
-      subtitleLines: payload.subtitleLines,
-      outputPath: `jobs/${payload.jobId}/render.mp4`,
-    },
-    {
-      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-      timeout: 600_000,
+  let response: any = null;
+  let lastError: any = null;
+
+  for (const fnUrl of fnUrls) {
+    try {
+      response = await axios.post(
+        fnUrl,
+        {
+          jobId: payload.jobId,
+          bucket: DEFAULT_BUCKET,
+          audioPath: uploadedAudio,
+          imagePaths: uploadedImages,
+          subtitleLines: payload.subtitleLines,
+          outputPath: `jobs/${payload.jobId}/render.mp4`,
+        },
+        {
+          headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+          timeout: 600_000,
+        }
+      );
+      console.info(`[render:${payload.jobId}] supabase_function_url=${fnUrl} status=${response.status}`);
+      break;
+    } catch (error: any) {
+      lastError = error;
+      const status = error?.response?.status;
+      if (status === 404) {
+        console.warn(`[render:${payload.jobId}] Supabase function not found at ${fnUrl}; trying next candidate`);
+        continue;
+      }
+      throw error;
     }
-  );
+  }
+
+  if (!response) {
+    throw new Error(`Supabase render function unavailable. Tried URLs: ${fnUrls.join(', ')}. Last error: ${lastError?.message || lastError}`);
+  }
 
   const renderedPath = (response?.data?.outputPath || response?.data?.result?.outputPath) as string | undefined;
   if (!renderedPath) {
@@ -122,6 +170,7 @@ export async function renderVideoViaSupabaseFunction(payload: {
 
   const download = await client.get(`/object/${DEFAULT_BUCKET}/${renderedPath}`, { responseType: 'arraybuffer' });
   const localOutput = path.join(process.cwd(), 'database/assets/videos', `${payload.jobId}.mp4`);
+  await fs.ensureDir(path.dirname(localOutput));
   await fs.writeFile(localOutput, Buffer.from(download.data));
 
   return {
