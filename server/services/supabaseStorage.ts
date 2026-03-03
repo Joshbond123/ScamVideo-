@@ -1,11 +1,14 @@
 import axios from 'axios';
 import fs from 'fs-extra';
 import path from 'path';
+import { getKeyValueByTypeAndName } from './supabaseKeyStore';
 
 const DEFAULT_BUCKET = process.env.SUPABASE_MEDIA_BUCKET || 'temp-media';
 
-function resolveRenderFunctionUrls() {
-  const configured = process.env.SUPABASE_RENDER_FUNCTION_URL;
+async function resolveRenderFunctionUrls() {
+  const envConfigured = process.env.SUPABASE_RENDER_FUNCTION_URL;
+  const dbConfigured = await getKeyValueByTypeAndName('config', 'SUPABASE_RENDER_FUNCTION_URL').catch(() => null);
+  const configured = (envConfigured || dbConfigured || '').trim();
   if (configured) {
     if (configured.includes(',')) {
       return configured
@@ -13,12 +16,23 @@ function resolveRenderFunctionUrls() {
         .map((x) => x.trim())
         .filter(Boolean);
     }
-    return [configured.trim()];
+    return [configured];
   }
+
+  const functionName = (
+    process.env.SUPABASE_RENDER_FUNCTION_NAME ||
+    (await getKeyValueByTypeAndName('config', 'SUPABASE_RENDER_FUNCTION_NAME').catch(() => null)) ||
+    ''
+  ).trim();
 
   const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
   if (!url) return [] as string[];
   const base = `${url.replace(/\/$/, '')}/functions/v1`;
+
+  if (functionName) {
+    return [`${base}/${functionName}`];
+  }
+
   return [`${base}/render-video`, `${base}/video-render`, `${base}/render`];
 }
 
@@ -106,6 +120,43 @@ export async function pruneSupabaseTempAssets(prefix = 'jobs/', maxAgeHours = 24
   return { deleted: toDelete.length };
 }
 
+
+export async function validateSupabaseRenderFunctionEndpoint() {
+  const fnUrls = await resolveRenderFunctionUrls();
+  if (!fnUrls.length) {
+    throw new Error('Supabase render function URL is not configured');
+  }
+
+  const { key } = getConfig();
+  let lastError: any = null;
+
+  for (const fnUrl of fnUrls) {
+    try {
+      const response = await axios.post(
+        fnUrl,
+        { healthcheck: true },
+        {
+          headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+          timeout: 15_000,
+          validateStatus: () => true,
+        }
+      );
+
+      if (response.status === 404) {
+        lastError = new Error(`404 at ${fnUrl}`);
+        continue;
+      }
+
+      console.info(`[render:preflight] render_provider=supabase_only endpoint=${fnUrl} probe_status=${response.status}`);
+      return { functionUrl: fnUrl, status: response.status };
+    } catch (error: any) {
+      lastError = error;
+    }
+  }
+
+  throw new Error(`Supabase render function unavailable. Tried URLs: ${fnUrls.join(', ')}. Last error: ${lastError?.message || lastError}`);
+}
+
 export async function renderVideoViaSupabaseFunction(payload: {
   jobId: string;
   audioPath: string;
@@ -115,7 +166,7 @@ export async function renderVideoViaSupabaseFunction(payload: {
   subtitleAss?: string;
   voiceoverMeta?: { voiceId: string; timingSource: string; durationSec: number } | null;
 }) {
-  const fnUrls = resolveRenderFunctionUrls();
+  const fnUrls = await resolveRenderFunctionUrls();
   if (!fnUrls.length) {
     throw new Error('Supabase render function URL is not configured');
   }

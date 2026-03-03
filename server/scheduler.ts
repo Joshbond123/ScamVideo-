@@ -16,6 +16,7 @@ import {
 } from './services/videoService';
 import { postCommentToFacebook, postPhotoToFacebook, postVideoToFacebook, verifyFacebookObjectPublished } from './services/facebookService';
 import { getActiveKeys, resolveCloudflareAccountId } from './services/keyService';
+import { validateSupabaseRenderFunctionEndpoint } from './services/supabaseStorage';
 
 const SCHEDULER_TICK_MS = 15_000;
 const STALE_GENERATING_MS = 15 * 60 * 1000;
@@ -157,6 +158,14 @@ async function validateRequiredConfig(schedule: Schedule) {
 
   const cloudflareAccountId = await resolveCloudflareAccountId();
   if (!cloudflareAccountId) missing.push('cloudflare_account_id');
+
+  if (schedule.type === 'video') {
+    try {
+      await validateSupabaseRenderFunctionEndpoint();
+    } catch (error: any) {
+      missing.push(`supabase_render_function:${error?.message || error}`);
+    }
+  }
 
   if (missing.length) throw new Error(`Missing required configuration: ${missing.join(', ')}`);
 }
