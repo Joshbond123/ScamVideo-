@@ -277,6 +277,7 @@ async function startServer() {
     const type = req.params.type as 'video' | 'post';
     const schedule: Schedule = {
       ...req.body,
+      type,
       id: crypto.randomUUID(),
       createdAt: new Date().toISOString(),
       status: 'pending'
@@ -338,7 +339,7 @@ async function startServer() {
     if (!schedule) return res.status(404).json({ error: 'Schedule not found' });
     
     // Run in background
-    runJob(schedule).catch(console.error);
+    runJob({ ...schedule, type }).catch(console.error);
     res.json({ message: 'Job started' });
   });
 
