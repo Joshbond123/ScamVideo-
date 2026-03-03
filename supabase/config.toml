@@ -1,0 +1,4 @@
+project_id = ""
+
+[functions.render-video]
+verify_jwt = false
