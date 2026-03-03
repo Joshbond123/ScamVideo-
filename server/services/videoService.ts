@@ -495,11 +495,17 @@ async function assembleVideoLocally(jobId: string, audioPath: string, imagePaths
 }
 
 export async function assembleVideo(jobId: string, audioPath: string, imagePaths: string[], subtitleLines: string[]) {
-  const remote = await renderVideoViaSupabaseFunction({ jobId, audioPath, imagePaths, subtitleLines });
-  if (!remote?.localOutput) {
-    throw new Error(`[render:${jobId}] Supabase render failed or returned no outputPath`);
+  try {
+    const remote = await renderVideoViaSupabaseFunction({ jobId, audioPath, imagePaths, subtitleLines });
+    if (remote?.localOutput) {
+      return remote.localOutput;
+    }
+    throw new Error(`[render:${jobId}] Supabase render returned no outputPath`);
+  } catch (error) {
+    console.warn(`[render:${jobId}] Supabase render unavailable; using local FFmpeg fallback`, error);
   }
-  return remote.localOutput;
+
+  return assembleVideoLocally(jobId, audioPath, imagePaths, subtitleLines);
 }
 
 export async function uploadToCatbox(filePath: string) {
