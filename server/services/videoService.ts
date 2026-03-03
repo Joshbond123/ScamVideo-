@@ -518,6 +518,9 @@ export async function uploadToCatbox(filePath: string) {
 
   const response = await axios.post('https://catbox.moe/user/api.php', form, {
     headers: form.getHeaders(),
+    timeout: 120_000,
+    maxBodyLength: Infinity,
+    maxContentLength: Infinity,
   });
 
   return response.data;
