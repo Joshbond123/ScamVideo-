@@ -4,6 +4,8 @@ import { FacebookPage } from '../../src/types';
 
 const FB_TIMEOUT_MS = 45_000;
 const FB_RETRY_LIMIT = 3;
+const FB_VERIFY_ATTEMPTS = 8;
+const FB_VERIFY_DELAY_MS = 8_000;
 
 function toFacebookPage(page: { id: string; name: string; accessToken: string }): FacebookPage {
   return {
@@ -171,23 +173,30 @@ export async function verifyFacebookObjectPublished(pageId: string, objectId: st
   const candidates = objectId.includes('_') ? [objectId, objectId.split('_')[1]] : [objectId, `${pageId}_${objectId}`];
   let lastError: any;
 
-  for (const candidate of candidates.filter(Boolean)) {
-    try {
-      const response = await fbGet(`https://graph.facebook.com/v19.0/${candidate}`, {
-        params: {
-          fields: 'id,permalink_url',
-          access_token: page.accessToken,
-        },
-      });
+  for (let attempt = 1; attempt <= FB_VERIFY_ATTEMPTS; attempt++) {
+    for (const candidate of candidates.filter(Boolean)) {
+      try {
+        const response = await fbGet(`https://graph.facebook.com/v19.0/${candidate}`, {
+          params: {
+            fields: 'id,permalink_url',
+            access_token: page.accessToken,
+          },
+        });
 
-      if (response?.data?.id) {
-        return {
-          id: String(response.data.id),
-          url: String(response.data.permalink_url || `https://facebook.com/${response.data.id}`),
-        };
+        if (response?.data?.id) {
+          return {
+            id: String(response.data.id),
+            url: String(response.data.permalink_url || `https://facebook.com/${response.data.id}`),
+          };
+        }
+      } catch (error) {
+        lastError = error;
       }
-    } catch (error) {
-      lastError = error;
+    }
+
+    if (attempt < FB_VERIFY_ATTEMPTS) {
+      console.warn(`[facebook:verify_publish] object not ready yet for ${objectId}; attempt ${attempt}/${FB_VERIFY_ATTEMPTS}`);
+      await new Promise((resolve) => setTimeout(resolve, FB_VERIFY_DELAY_MS));
     }
   }
 

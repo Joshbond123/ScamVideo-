@@ -2,6 +2,8 @@ import path from 'path';
 import fs from 'fs-extra';
 import axios from 'axios';
 import FormData from 'form-data';
+import { spawn } from 'child_process';
+import ffmpegStatic from 'ffmpeg-static';
 import { resolveCloudflareAccountId, withKeyFailover } from './keyService';
 import { readJson, PATHS } from '../db';
 import { deleteSupabaseAssets, pruneSupabaseTempAssets, renderVideoViaSupabaseFunction } from './supabaseStorage';
@@ -25,8 +27,23 @@ type VoiceoverMeta = {
   durationSec: number;
 };
 
+type OverlayAssetType = 'post_image' | 'video_scene';
+
 const UNREAL_VOICES = ['Oliver', 'Noah', 'Ethan', 'Daniel'];
 const voiceMetaByJob = new Map<string, VoiceoverMeta>();
+
+function toSeconds(value: unknown) {
+  const raw = Number(value);
+  if (!Number.isFinite(raw)) return Number.NaN;
+  if (raw >= 1_000) return raw / 1_000;
+  return raw;
+}
+
+
+function sanitizeVideoImagePrompt(prompt: string) {
+  const base = String(prompt || '').replace(/\s+/g, ' ').trim();
+  return `${base}. Cinematic photoreal scene, visual storytelling only. Absolutely no readable text, letters, words, numbers, captions, subtitles, logos, signs, UI labels, or watermarks in the image.`;
+}
 
 function extractJsonObject(raw: string) {
   const trimmed = raw.trim();
@@ -144,8 +161,9 @@ function normalizeWordTimings(raw: any): VoiceTimingWord[] {
   return raw
     .map((entry: any) => {
       const word = String(entry?.word || entry?.text || '').trim();
-      const start = Number(entry?.start ?? entry?.start_time ?? entry?.from ?? entry?.offset);
-      const end = Number(entry?.end ?? entry?.end_time ?? entry?.to ?? (Number.isFinite(start) ? start + Number(entry?.duration || 0) : NaN));
+      const start = toSeconds(entry?.start ?? entry?.start_time ?? entry?.from ?? entry?.offset);
+      const duration = toSeconds(entry?.duration);
+      const end = toSeconds(entry?.end ?? entry?.end_time ?? entry?.to ?? (Number.isFinite(start) ? start + duration : Number.NaN));
       if (!word || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
       return { word, start, end };
     })
@@ -202,6 +220,8 @@ async function writeAssSubtitle(jobId: string, events: Array<{ text: string; sta
   }
 
   await fs.writeFile(assPath, ass.join('\n'), 'utf8');
+  const dialogueLines = Math.max(0, ass.length - 13);
+  console.info(`[subtitle:${jobId}] ass_created path=${assPath} dialogue_lines=${dialogueLines}`);
   return assPath;
 }
 
@@ -234,24 +254,28 @@ export async function generateVoiceover(text: string, jobId: string) {
     const audioUrl = String(response.data?.AudioUrl || response.data?.audio_url || response.data?.OutputUri || '');
     const timestampsUri = String(response.data?.TimestampsUri || response.data?.timestamps_uri || '');
     let timings = normalizeWordTimings(response.data?.Timestamps || response.data?.timestamps || response.data?.word_timestamps || []);
+    console.info(`[voiceover:${jobId}] timing_data:initial_count=${timings.length} source=response_payload`);
 
     if (!audioUrl) throw new Error(`UnrealSpeech response missing audio URL: ${JSON.stringify(response.data || {})}`);
 
     if (!timings.length && timestampsUri) {
       const tsResp = await axios.get(timestampsUri, { timeout: 120_000 });
       timings = normalizeWordTimings(tsResp.data?.timestamps || tsResp.data?.words || tsResp.data || []);
+      console.info(`[voiceover:${jobId}] timing_data:loaded_from_uri=${timestampsUri} count=${timings.length}`);
     }
-
-    if (!timings.length) throw new Error(`UnrealSpeech response missing word timestamps: ${JSON.stringify(response.data || {})}`);
 
     const audioResp = await axios.get(audioUrl, { responseType: 'arraybuffer', timeout: 120_000 });
     await fs.writeFile(filePath, Buffer.from(audioResp.data));
+
+    if (!timings.length) {
+      console.warn(`[voiceover:${jobId}] UnrealSpeech returned audio without word timings; rendering will continue without burned subtitles.`);
+    }
 
     return {
       filePath,
       voiceId,
       words: timings,
-      timingSource: timestampsUri ? 'unrealspeech_timestamps_uri' : 'unrealspeech_word_timestamps',
+      timingSource: timings.length ? (timestampsUri ? 'unrealspeech_timestamps_uri' : 'unrealspeech_word_timestamps') : 'none',
       durationSec: Number(timings[timings.length - 1].end || 0),
     };
   });
@@ -287,7 +311,8 @@ async function generateImageWithPollinations(prompt: string, jobId: string, scen
   await fs.ensureDir(dir);
   const filePath = path.join(dir, `scene_${sceneIdx}.png`);
 
-  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1080&height=1920&nologo=true`;
+  const strictPrompt = sanitizeVideoImagePrompt(prompt);
+  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(strictPrompt)}?width=1080&height=1920&nologo=true`;
   const response = await axios.get(url, {
     responseType: 'arraybuffer',
     timeout: 60_000,
@@ -300,68 +325,165 @@ async function generateImageWithPollinations(prompt: string, jobId: string, scen
 
 export async function generateImage(prompt: string, jobId: string, sceneIdx: number) {
   const accountId = await resolveCloudflareAccountId();
-  if (!accountId) {
-    throw new Error('Cloudflare account id missing. Set CLOUDFLARE_ACCOUNT_ID or save settings.cloudflareAccountId or config/CLOUDFLARE_ACCOUNT_ID in Supabase api_keys.');
+
+  if (accountId) {
+    try {
+      return await withKeyFailover('workers-ai', async (key) => {
+        const response = await axios.post(
+          `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/black-forest-labs/flux-1-schnell`,
+          {
+            prompt: sanitizeVideoImagePrompt(prompt),
+            negative_prompt: 'text, words, letters, numbers, captions, subtitles, logo, watermark, signage, UI',
+            steps: 6,
+          },
+          {
+            headers: { Authorization: `Bearer ${key.key}`, 'Content-Type': 'application/json' },
+            timeout: 60_000,
+          }
+        );
+
+        const dir = path.join(process.cwd(), 'database/assets/images', jobId);
+        await fs.ensureDir(dir);
+        const filePath = path.join(dir, `scene_${sceneIdx}.png`);
+
+        const base64 = response?.data?.result?.image || response?.data?.image;
+        if (!base64 || typeof base64 !== 'string') {
+          throw new Error(`Workers AI response missing image payload: ${JSON.stringify(response?.data || {})}`);
+        }
+
+        await fs.writeFile(filePath, Buffer.from(base64, 'base64'));
+        return filePath;
+      });
+    } catch (error) {
+      console.warn(`[image:${jobId}:${sceneIdx}] Workers AI failed; falling back to Pollinations:`, error);
+    }
+  } else {
+    console.warn(`[image:${jobId}:${sceneIdx}] Cloudflare account id missing; skipping Workers AI and using fallbacks.`);
   }
 
   try {
-    return await withKeyFailover('workers-ai', async (key) => {
-      const response = await axios.post(
-        `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/black-forest-labs/flux-1-schnell`,
-        {
-          prompt,
-          steps: 6,
-        },
-        {
-          headers: { Authorization: `Bearer ${key.key}`, 'Content-Type': 'application/json' },
-          timeout: 60_000,
-        }
-      );
-
-      const dir = path.join(process.cwd(), 'database/assets/images', jobId);
-      await fs.ensureDir(dir);
-      const filePath = path.join(dir, `scene_${sceneIdx}.png`);
-
-      const base64 = response?.data?.result?.image || response?.data?.image;
-      if (!base64 || typeof base64 !== 'string') {
-        throw new Error(`Workers AI response missing image payload: ${JSON.stringify(response?.data || {})}`);
-      }
-
-      await fs.writeFile(filePath, Buffer.from(base64, 'base64'));
-      return filePath;
-    });
-  } catch (error) {
-    console.warn(`[image:${jobId}:${sceneIdx}] Workers AI failed; falling back to Pollinations:`, error);
-    try {
-      return await generateImageWithPollinations(prompt, jobId, sceneIdx);
-    } catch (fallbackError) {
-      console.warn(`[image:${jobId}:${sceneIdx}] Pollinations failed; using local placeholder image:`, fallbackError);
-      return generateLocalPlaceholderImage(jobId, sceneIdx);
-    }
+    return await generateImageWithPollinations(prompt, jobId, sceneIdx);
+  } catch (fallbackError) {
+    console.warn(`[image:${jobId}:${sceneIdx}] Pollinations failed; using local placeholder image:`, fallbackError);
+    return generateLocalPlaceholderImage(jobId, sceneIdx);
   }
 }
 
-export async function addTitleOverlayToImage(imagePath: string, _title: string) {
+
+async function renderVideoLocallyWithFfmpeg(args: string[]) {
+  if (!ffmpegStatic) throw new Error('ffmpeg-static binary is unavailable for this platform');
+
+  await new Promise<void>((resolve, reject) => {
+    const proc = spawn(ffmpegStatic, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+
+    proc.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    proc.on('error', (error) => reject(error));
+    proc.on('close', (code) => {
+      if (code === 0) return resolve();
+      reject(new Error(`ffmpeg exited with code ${code}: ${stderr.slice(-4000)}`));
+    });
+  });
+}
+
+async function assembleVideoLocally(jobId: string, audioPath: string, imagePaths: string[], subtitleAssPath?: string) {
+  const outputPath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.mp4`);
+  await fs.ensureDir(path.dirname(outputPath));
+
+  const concatFile = path.join(process.cwd(), 'database/assets/videos', `${jobId}_images.txt`);
+  const durationSec = Math.max(3, Number((voiceMetaByJob.get(jobId)?.durationSec || 0).toFixed(2)) || imagePaths.length * 3);
+  const perImage = Math.max(2.5, durationSec / Math.max(1, imagePaths.length));
+
+  const lines: string[] = [];
+  for (const img of imagePaths) {
+    const safePath = img.replace(/'/g, "'\''");
+    lines.push(`file '${safePath}'`);
+    lines.push(`duration ${perImage.toFixed(3)}`);
+  }
+  if (imagePaths.length) {
+    const last = imagePaths[imagePaths.length - 1].replace(/'/g, "'\''");
+    lines.push(`file '${last}'`);
+  }
+  await fs.writeFile(concatFile, lines.join('\n'), 'utf8');
+
+  const vfParts = ['scale=1080:1920:force_original_aspect_ratio=increase', 'crop=1080:1920', 'format=yuv420p'];
+  if (subtitleAssPath) {
+    const escaped = subtitleAssPath.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/,/g, '\\,');
+    vfParts.push(`subtitles='${escaped}'`);
+  }
+
+  const ffmpegArgs = [
+    '-y',
+    '-f', 'concat',
+    '-safe', '0',
+    '-i', concatFile,
+    '-i', audioPath,
+    '-vf', vfParts.join(','),
+    '-c:v', 'libx264',
+    '-preset', 'veryfast',
+    '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac',
+    '-b:a', '192k',
+    '-shortest',
+    outputPath,
+  ];
+
+  console.info(`[render:${jobId}] ffmpeg_command=${[String(ffmpegStatic), ...ffmpegArgs].join(' ')}`);
+  await renderVideoLocallyWithFfmpeg(ffmpegArgs);
+
+  if (subtitleAssPath) {
+    console.info(`[render:${jobId}] subtitles_applied=true subtitle_source=${subtitleAssPath}`);
+  } else {
+    console.info(`[render:${jobId}] subtitles_applied=false reason=no_subtitle_file`);
+  }
+
+  await fs.remove(concatFile).catch(() => undefined);
+  return outputPath;
+}
+
+export async function addTitleOverlayToImage(imagePath: string, _title: string, assetType: OverlayAssetType) {
+  if (assetType !== 'post_image') {
+    console.warn(`[overlay] blocked assetType=${assetType} path=${imagePath}`);
+    return imagePath;
+  }
+
+  // Intentionally no-op for now. We keep this hook for post image pipeline only.
+  console.info(`[overlay] post_image overlay hook path=${imagePath}`);
   return imagePath;
 }
 
 export async function generatePostImageWithTitleOverlay(prompt: string, title: string, jobId: string) {
   const cleanPrompt = `${prompt}. No text, letters, words, logo, watermark, typography.`;
   const imagePath = await generateImage(cleanPrompt, jobId, 0);
-  return addTitleOverlayToImage(imagePath, title);
+  return addTitleOverlayToImage(imagePath, title, 'post_image');
 }
 
 export async function assembleVideo(jobId: string, audioPath: string, imagePaths: string[], subtitleLines: string[]) {
-  console.info(`[render:${jobId}] render_provider=supabase_only`);
+  console.info(`[render:${jobId}] render_provider=local_ffmpeg_with_supabase_fallback`);
 
   const meta = voiceMetaByJob.get(jobId);
-  if (!meta?.words?.length) {
-    throw new Error(`[render:${jobId}] missing UnrealSpeech timing metadata; cannot render synchronized subtitles`);
+  let subtitleEvents: Array<{ text: string; start: number; end: number }> = [];
+  let subtitleAssPath = '';
+
+  if (meta?.words?.length) {
+    console.info(`[render:${jobId}] timing_data:using_words=${meta.words.length} source=${meta.timingSource}`);
+    subtitleEvents = buildSubtitleEventsFromWords(meta.words);
+    subtitleAssPath = await writeAssSubtitle(jobId, subtitleEvents);
+    console.info(`[render:${jobId}] subtitle_file=${subtitleAssPath} subtitle_events=${subtitleEvents.length}`);
+  } else {
+    console.warn(`[render:${jobId}] missing word-level timing metadata; rendering without burned subtitles`);
   }
 
-  const subtitleEvents = buildSubtitleEventsFromWords(meta.words);
-  const subtitleAssPath = await writeAssSubtitle(jobId, subtitleEvents);
-  console.info(`[render:${jobId}] subtitle_file=${subtitleAssPath} subtitle_events=${subtitleEvents.length}`);
+  try {
+    const localOutput = await assembleVideoLocally(jobId, audioPath, imagePaths, subtitleAssPath || undefined);
+    console.info(`[render:${jobId}] local_ffmpeg_render=success output=${localOutput}`);
+    return localOutput;
+  } catch (localError: any) {
+    console.warn(`[render:${jobId}] local ffmpeg render failed; falling back to Supabase function`, localError?.message || localError);
+  }
 
   const remote = await renderVideoViaSupabaseFunction({
     jobId,
@@ -369,15 +491,15 @@ export async function assembleVideo(jobId: string, audioPath: string, imagePaths
     imagePaths,
     subtitleLines,
     subtitleEvents,
-    subtitleAss: await fs.readFile(subtitleAssPath, 'utf8'),
+    subtitleAss: subtitleAssPath ? await fs.readFile(subtitleAssPath, 'utf8') : '',
     voiceoverMeta: meta,
   });
 
   if (!remote?.localOutput) {
-    throw new Error(`[render:${jobId}] render_provider=supabase_only failed: missing outputPath/localOutput`);
+    throw new Error(`[render:${jobId}] both local and Supabase rendering failed: missing outputPath/localOutput`);
   }
 
-  console.info(`[render:${jobId}] subtitles_burn_step=success subtitles_burned=${String(remote.subtitlesBurned)} output=${remote.outputPath || remote.localOutput} duration_sec=${Number(remote.outputDurationSec || 0).toFixed(2)} status=${remote.renderStatus || 'unknown'}`);
+  console.info(`[render:${jobId}] supabase_fallback_render=success subtitles_burned=${String(remote.subtitlesBurned)} output=${remote.outputPath || remote.localOutput} duration_sec=${Number(remote.outputDurationSec || 0).toFixed(2)} status=${remote.renderStatus || 'unknown'}`);
   return remote.localOutput;
 }
 
