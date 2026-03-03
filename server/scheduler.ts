@@ -12,10 +12,9 @@ import {
   generatePostImageWithTitleOverlay,
   cleanupPostImageAsset,
   generateFacebookComment,
-  generateViralPost,
   rewriteTopicForVideo,
 } from './services/videoService';
-import { postCommentToFacebook, postPhotoToFacebook, postVideoToFacebook, verifyFacebookObjectPublished } from './services/facebookService';
+import { postCommentToFacebook, postPhotoToFacebook, postVideoToFacebook } from './services/facebookService';
 import { getActiveKeys, resolveCloudflareAccountId } from './services/keyService';
 
 const SCHEDULER_TICK_MS = 15_000;
@@ -357,7 +356,7 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
     const stitchedScript = [scriptData.hook, scriptData.script, scriptData.preCtaScene?.text, scriptData.cta].filter(Boolean).join(' ');
     const audioPath = await withStage(schedule, 'video_voiceover_generation', async () => generateVoiceover(stitchedScript, jobId));
 
-    const scenePlan = [...scriptData.scenes, scriptData.preCtaScene, { text: scriptData.cta, imagePrompt: 'Professional anti-scam awareness closing frame, cyber safety visual, cinematic vertical 9:16, no text, no logo' }].filter(Boolean);
+    const scenePlan = [...scriptData.scenes, scriptData.preCtaScene, { text: scriptData.cta, imagePrompt: `Topic-aware call to action visual for ${topic}, dynamic social media ending frame, no text, no logo, vertical 9:16` }].filter(Boolean);
     const imagePaths: string[] = [];
     await withStage(schedule, 'video_scene_image_generation', async () => {
       for (let i = 0; i < scenePlan.length; i++) {
@@ -382,32 +381,15 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
       const description = `${scriptData.caption}\n\n${scriptData.hashtags}`;
       const fbResult = await postVideoToFacebook(schedule.pageId, videoUrl, description);
       const publishTargetId = String((fbResult as any)?.post_id || (fbResult as any)?.id || '');
-      if (!publishTargetId) {
-        throw new Error(`Facebook publish returned no object id: ${JSON.stringify(fbResult || {})}`);
-      }
-
-      const verified = await verifyFacebookObjectPublished(schedule.pageId, publishTargetId);
-      await logEvent(schedule.type, 'info', `facebook_publish_verified id=${schedule.id} object=${verified.id} url=${verified.url}`, schedule.niche);
 
       const settings = await readJson<any>(PATHS.settings);
       const comment = await generateFacebookComment(scriptData.title, scriptData.caption, topic, settings?.facebookCommentUrl || '');
 
       if (publishTargetId) {
-        let commentError: any;
-        for (let attempt = 1; attempt <= 3; attempt++) {
-          try {
-            await postCommentToFacebook(schedule.pageId, publishTargetId, comment);
-            commentError = null;
-            await logEvent(schedule.type, 'info', `comment_publish_success id=${schedule.id} attempt=${attempt}`, schedule.niche);
-            break;
-          } catch (error: any) {
-            commentError = error;
-            await logEvent(schedule.type, 'error', `comment_publish_retry id=${schedule.id} attempt=${attempt} message=${error?.message || error}`, schedule.niche);
-          }
-        }
-
-        if (commentError) {
-          throw new Error(`Failed to publish Facebook comment after retries: ${commentError?.message || commentError}`);
+        try {
+          await postCommentToFacebook(schedule.pageId, publishTargetId, comment);
+        } catch (error: any) {
+          await logEvent(schedule.type, 'error', `comment_publish_failed id=${schedule.id} message=${error?.message || error}`, schedule.niche);
         }
       }
 
@@ -419,7 +401,7 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
           niche: schedule.niche,
           postedAt: new Date().toISOString(),
           status: 'published',
-          facebookUrl: verified.url,
+          facebookUrl: publishTargetId ? `https://facebook.com/${publishTargetId}` : '',
           caption: scriptData.caption,
           hashtags: scriptData.hashtags,
         },
@@ -432,44 +414,35 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
 }
 
 async function runPostPipeline(schedule: Schedule, topic: string) {
-  const postData = await withStage(schedule, 'post_script_generation', async () => generateViralPost(schedule.niche, topic));
-  await updateSchedule(schedule.id, schedule.type, { generatedTitle: postData?.title || '' });
+  const scriptData = await withStage(schedule, 'post_script_generation', async () => generateScript(schedule.niche, topic));
+  await updateSchedule(schedule.id, schedule.type, { generatedTitle: scriptData?.title || '' });
+
+  if (!Array.isArray(scriptData?.scenes) || scriptData.scenes.length === 0) {
+    throw new Error('Generated post script has no scenes');
+  }
 
   const imgPath = await withStage(schedule, 'post_image_generation_with_overlay', async () =>
-    generatePostImageWithTitleOverlay(postData.imagePrompt, postData.overlayText, schedule.id)
+    generatePostImageWithTitleOverlay(scriptData.scenes[0].imagePrompt, scriptData.title, schedule.id)
   );
 
   const imageUrl = await withStage(schedule, 'post_host_catbox', async () => uploadToCatbox(imgPath));
   await withStage(schedule, 'post_cleanup_local_asset', async () => cleanupPostImageAsset(imgPath));
 
   await withStage(schedule, 'post_publish_facebook', async () => {
-    const description = `${postData.caption}\n\n${postData.victimCta}\n\n${postData.hashtags}`;
-    const fbResult = await postPhotoToFacebook(schedule.pageId, imageUrl, description);
-    const publishTargetId = String((fbResult as any)?.post_id || (fbResult as any)?.id || '');
-
-    const settings = await readJson<any>(PATHS.settings);
-    const comment = await generateFacebookComment(postData.title, postData.caption, topic, settings?.facebookCommentUrl || '');
-
-    if (publishTargetId) {
-      try {
-        await postCommentToFacebook(schedule.pageId, publishTargetId, comment);
-      } catch (error: any) {
-        await logEvent(schedule.type, 'error', `comment_publish_failed id=${schedule.id} message=${error?.message || error}`, schedule.niche);
-      }
-    }
+    const fbResult = await postPhotoToFacebook(schedule.pageId, imageUrl, `${scriptData.caption}\n\n${scriptData.hashtags}`);
 
     await updateJson(PATHS.content.published_posts, (data: any[]) => [
       {
         id: schedule.id,
         type: 'post',
-        title: postData.title,
+        title: scriptData.title,
         niche: schedule.niche,
         postedAt: new Date().toISOString(),
         status: 'published',
-        facebookUrl: publishTargetId ? `https://facebook.com/${publishTargetId}` : `https://facebook.com/${fbResult.id}`,
+        facebookUrl: `https://facebook.com/${fbResult.id}`,
         thumbnail: imageUrl,
-        caption: postData.caption,
-        hashtags: postData.hashtags,
+        caption: scriptData.caption,
+        hashtags: scriptData.hashtags,
       },
       ...(Array.isArray(data) ? data : []),
     ]);

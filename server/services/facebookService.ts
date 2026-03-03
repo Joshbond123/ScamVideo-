@@ -122,30 +122,3 @@ export async function postCommentToFacebook(pageId: string, postId: string, mess
 
   throw lastError instanceof Error ? lastError : new Error('Failed to post Facebook comment');
 }
-
-export async function verifyFacebookObjectPublished(pageId: string, objectId: string) {
-  const page = await getPageOrThrow(pageId);
-  const candidates = objectId.includes('_') ? [objectId, objectId.split('_')[1]] : [objectId, `${pageId}_${objectId}`];
-  let lastError: any;
-
-  for (const candidate of candidates.filter(Boolean)) {
-    try {
-      const response = await axios.get(`https://graph.facebook.com/v19.0/${candidate}`, {
-        params: {
-          fields: 'id,permalink_url',
-          access_token: page.accessToken,
-        },
-      });
-      if (response?.data?.id) {
-        return {
-          id: String(response.data.id),
-          url: String(response.data.permalink_url || `https://facebook.com/${response.data.id}`),
-        };
-      }
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  throw lastError instanceof Error ? lastError : new Error('Unable to verify Facebook publish object');
-}

@@ -6,9 +6,9 @@ const DEFAULT_BUCKET = process.env.SUPABASE_MEDIA_BUCKET || 'temp-media';
 
 function resolveRenderFunctionUrl() {
   if (process.env.SUPABASE_RENDER_FUNCTION_URL) return process.env.SUPABASE_RENDER_FUNCTION_URL;
-  const baseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
-  if (!baseUrl) return '';
-  return `${baseUrl.replace(/\/$/, '')}/functions/v1/render-video`;
+  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
+  if (!url) return '';
+  return `${url.replace(/\/$/, '')}/functions/v1/render-video`;
 }
 
 type StorageFile = {
@@ -34,21 +34,7 @@ function makeClient() {
   });
 }
 
-async function ensureMediaBucket() {
-  const client = makeClient();
-  try {
-    await client.get(`/bucket/${DEFAULT_BUCKET}`);
-  } catch (error: any) {
-    if (error?.response?.status === 404 || error?.response?.data?.error === 'Bucket not found') {
-      await client.post('/bucket', { id: DEFAULT_BUCKET, name: DEFAULT_BUCKET, public: false });
-      return;
-    }
-    throw error;
-  }
-}
-
 export async function uploadLocalAssetToSupabase(localPath: string, remotePath: string, contentType: string) {
-  await ensureMediaBucket();
   const client = makeClient();
   const bytes = await fs.readFile(localPath);
   await client.post(`/object/${DEFAULT_BUCKET}/${remotePath}`, bytes, {
@@ -100,8 +86,6 @@ export async function renderVideoViaSupabaseFunction(payload: {
   audioPath: string;
   imagePaths: string[];
   subtitleLines: string[];
-  subtitleEvents?: Array<{ text: string; start: number; end: number }>;
-  voiceover?: { voiceId: string; timingSource: string; durationSec: number } | null;
 }) {
   const fnUrl = resolveRenderFunctionUrl();
   if (!fnUrl) return null;
@@ -123,8 +107,6 @@ export async function renderVideoViaSupabaseFunction(payload: {
       audioPath: uploadedAudio,
       imagePaths: uploadedImages,
       subtitleLines: payload.subtitleLines,
-      subtitleEvents: payload.subtitleEvents || [],
-      voiceover: payload.voiceover || null,
       outputPath: `jobs/${payload.jobId}/render.mp4`,
     },
     {
