@@ -85,11 +85,15 @@ export async function withKeyFailover<T>(
   for (const key of orderedKeys) {
     try {
       const result = await executor(key);
-      await trackKeyUsage(key.id, provider, true);
+      await trackKeyUsage(key.id, provider, true).catch((error) => {
+        console.warn(`[keys:${provider}] trackKeyUsage(success) skipped:`, (error as any)?.message || error);
+      });
       return result;
     } catch (error) {
       lastError = error;
-      await trackKeyUsage(key.id, provider, false);
+      await trackKeyUsage(key.id, provider, false).catch((trackError) => {
+        console.warn(`[keys:${provider}] trackKeyUsage(fail) skipped:`, (trackError as any)?.message || trackError);
+      });
     }
   }
 

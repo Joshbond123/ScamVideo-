@@ -145,7 +145,7 @@ async function validateRequiredConfig(schedule: Schedule) {
 
   const missing: string[] = [];
 
-  const keyProviders: ApiKey['provider'][] = schedule.type === 'video' ? ['cerebras', 'unrealspeech', 'workers-ai'] : ['cerebras', 'workers-ai'];
+  const keyProviders: ApiKey['provider'][] = schedule.type === 'video' ? ['cerebras', 'unrealspeech'] : ['cerebras'];
   for (const provider of keyProviders) {
     const active = await getActiveKeys(provider);
     if (!active.length) missing.push(`api_key:${provider}`);
@@ -157,7 +157,9 @@ async function validateRequiredConfig(schedule: Schedule) {
   if (!settings?.catboxHash) missing.push('catboxHash');
 
   const cloudflareAccountId = await resolveCloudflareAccountId();
-  if (!cloudflareAccountId) missing.push('cloudflare_account_id');
+  if (!cloudflareAccountId) {
+    await logEvent(schedule.type, 'info', 'cloudflare_account_id_missing: workers-ai disabled, using image fallbacks', schedule.niche);
+  }
 
   if (schedule.type === 'video') {
     try {
@@ -442,7 +444,7 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
     const imagePaths: string[] = [];
     await withStage(schedule, 'video_scene_image_generation', async () => {
       for (let i = 0; i < scenePlan.length; i++) {
-        const prompt = `${scenePlan[i].imagePrompt}. Vertical 9:16 composition. No text, words, watermarks, logos.`;
+        const prompt = `${scenePlan[i].imagePrompt}. Vertical 9:16 composition. No text, words, letters, numbers, subtitles, captions, watermarks, logos, or signage.`;
         const imgPath = await generateImage(prompt, jobId, i);
         imagePaths.push(imgPath);
       }
@@ -490,7 +492,12 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
       ]);
     });
   } finally {
-    await withStage(schedule, 'video_cleanup_assets', async () => cleanupJobAssets(jobId));
+    try {
+      await withStage(schedule, 'video_cleanup_assets', async () => cleanupJobAssets(jobId));
+    } catch (error: any) {
+      const e = normalizeError(error);
+      await logEvent(schedule.type, 'error', `cleanup_non_fatal id=${schedule.id} message=${e.message}`, schedule.niche);
+    }
   }
 }
 
