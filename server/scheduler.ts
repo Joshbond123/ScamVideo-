@@ -1,4 +1,5 @@
 import axios from 'axios';
+import ffmpegStatic from 'ffmpeg-static';
 import { readJson, updateJson, PATHS } from './db';
 import { Schedule, ApiKey } from '../src/types';
 import { discoverTopics, getUniqueTopic } from './services/topicService';
@@ -165,7 +166,16 @@ async function validateRequiredConfig(schedule: Schedule) {
     try {
       await validateSupabaseRenderFunctionEndpoint();
     } catch (error: any) {
-      missing.push(`supabase_render_function:${error?.message || error}`);
+      if (ffmpegStatic) {
+        await logEvent(
+          schedule.type,
+          'info',
+          `supabase_render_function_unavailable:local_ffmpeg_fallback_enabled message=${error?.message || error}`,
+          schedule.niche
+        );
+      } else {
+        missing.push(`supabase_render_function:${error?.message || error}`);
+      }
     }
   }
 

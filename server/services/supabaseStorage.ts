@@ -182,7 +182,15 @@ export async function validateSupabaseRenderFunctionEndpoint() {
         continue;
       }
 
-      console.info(`[render:preflight] render_provider=supabase_only endpoint=${fnUrl} probe_status=${response.status}`);
+      const fnName = String(response.data?.function || '').trim();
+      const timelineMode = String(response.data?.subtitleTimelineMode || '').trim();
+      if (fnName !== 'render-video' || timelineMode !== 'concat') {
+        lastError = new Error(`Incompatible render function at ${fnUrl}: function=${fnName || 'unknown'} subtitleTimelineMode=${timelineMode || 'unknown'}`);
+        continue;
+      }
+
+      const rendererVersion = String(response.data?.rendererVersion || 'unknown');
+      console.info(`[render:preflight] render_provider=supabase_only endpoint=${fnUrl} probe_status=${response.status} renderer_version=${rendererVersion} subtitle_timeline_mode=${timelineMode}`);
       return { functionUrl: fnUrl, status: response.status };
     } catch (error: any) {
       lastError = error;
@@ -223,6 +231,12 @@ export async function renderVideoViaSupabaseFunction(payload: {
     uploadedImages.push(await uploadLocalAssetToSupabase(payload.imagePaths[i], `jobs/${payload.jobId}/scene_${i}.png`, 'image/png'));
   }
 
+  if (!payload.jobId || !uploadedAudio || !uploadedImages.length) {
+    throw new Error(
+      `render payload incomplete before edge call: jobId=${String(payload.jobId || '')} audioPath=${String(uploadedAudio || '')} imageCount=${uploadedImages.length}`
+    );
+  }
+
   const { key } = getConfig();
   let response: any = null;
   let lastError: any = null;
@@ -230,21 +244,27 @@ export async function renderVideoViaSupabaseFunction(payload: {
 
   for (const fnUrl of fnUrls) {
     try {
+      const renderRequestBody = {
+        jobId: payload.jobId,
+        bucket: DEFAULT_BUCKET,
+        audioPath: uploadedAudio,
+        imagePaths: uploadedImages,
+        subtitleLines: payload.subtitleLines,
+        subtitleEvents: payload.subtitleEvents || [],
+        subtitleAssPath: uploadedSubtitleAss || "",
+        subtitleAss: payload.subtitleAss || "",
+        voiceoverMeta: payload.voiceoverMeta || null,
+        renderProvider: "supabase_only",
+        outputPath: `jobs/${payload.jobId}/render.mp4`,
+      };
+
+      console.info(
+        `[render:${payload.jobId}] supabase_request_payload endpoint=${fnUrl} bucket=${renderRequestBody.bucket} audio_path=${renderRequestBody.audioPath} image_count=${renderRequestBody.imagePaths.length} subtitle_events=${renderRequestBody.subtitleEvents.length} has_subtitle_ass=${Boolean(renderRequestBody.subtitleAssPath)}`
+      );
+
       response = await axios.post(
         fnUrl,
-        {
-          jobId: payload.jobId,
-          bucket: DEFAULT_BUCKET,
-          audioPath: uploadedAudio,
-          imagePaths: uploadedImages,
-          subtitleLines: payload.subtitleLines,
-          subtitleEvents: payload.subtitleEvents || [],
-          subtitleAssPath: uploadedSubtitleAss || "",
-          subtitleAss: payload.subtitleAss || "",
-          voiceoverMeta: payload.voiceoverMeta || null,
-          renderProvider: "supabase_only",
-          outputPath: `jobs/${payload.jobId}/render.mp4`,
-        },
+        renderRequestBody,
         {
           headers: makeEdgeFunctionHeaders(key),
           timeout: 600_000,
@@ -269,6 +289,11 @@ export async function renderVideoViaSupabaseFunction(payload: {
   }
 
   const renderedPath = (response?.data?.outputPath || response?.data?.result?.outputPath || response?.data?.url || response?.data?.result?.url || response?.data?.signedUrl || response?.data?.result?.signedUrl) as string | undefined;
+  const responseFunctionName = String(response?.data?.function || response?.data?.result?.function || '').trim();
+  const responseRendererVersion = String(response?.data?.rendererVersion || response?.data?.result?.rendererVersion || 'unknown');
+  if (responseFunctionName && responseFunctionName !== 'render-video') {
+    throw new Error(`Unexpected Supabase renderer function=${responseFunctionName}; expected render-video`);
+  }
   if (!renderedPath) {
     throw new Error(`Supabase render function response missing outputPath: ${JSON.stringify(response?.data || {})}`);
   }
@@ -293,5 +318,6 @@ export async function renderVideoViaSupabaseFunction(payload: {
     functionUrl: usedUrl,
     outputDurationSec,
     subtitlesBurned,
+    rendererVersion: responseRendererVersion,
   };
 }
