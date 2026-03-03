@@ -132,7 +132,7 @@ export async function verifyFacebookObjectPublished(pageId: string, objectId: st
     try {
       const response = await axios.get(`https://graph.facebook.com/v19.0/${candidate}`, {
         params: {
-          fields: 'id,permalink_url,is_published,status',
+          fields: 'id,permalink_url',
           access_token: page.accessToken,
         },
       });

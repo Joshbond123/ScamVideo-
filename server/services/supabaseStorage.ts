@@ -100,6 +100,8 @@ export async function renderVideoViaSupabaseFunction(payload: {
   audioPath: string;
   imagePaths: string[];
   subtitleLines: string[];
+  subtitleEvents?: Array<{ text: string; start: number; end: number }>;
+  voiceover?: { voiceId: string; timingSource: string; durationSec: number } | null;
 }) {
   const fnUrl = resolveRenderFunctionUrl();
   if (!fnUrl) return null;
@@ -121,6 +123,8 @@ export async function renderVideoViaSupabaseFunction(payload: {
       audioPath: uploadedAudio,
       imagePaths: uploadedImages,
       subtitleLines: payload.subtitleLines,
+      subtitleEvents: payload.subtitleEvents || [],
+      voiceover: payload.voiceover || null,
       outputPath: `jobs/${payload.jobId}/render.mp4`,
     },
     {

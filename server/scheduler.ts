@@ -357,7 +357,7 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
     const stitchedScript = [scriptData.hook, scriptData.script, scriptData.preCtaScene?.text, scriptData.cta].filter(Boolean).join(' ');
     const audioPath = await withStage(schedule, 'video_voiceover_generation', async () => generateVoiceover(stitchedScript, jobId));
 
-    const scenePlan = [...scriptData.scenes, scriptData.preCtaScene, { text: scriptData.cta, imagePrompt: `Topic-aware call to action visual for ${topic}, dynamic social media ending frame, no text, no logo, vertical 9:16` }].filter(Boolean);
+    const scenePlan = [...scriptData.scenes, scriptData.preCtaScene, { text: scriptData.cta, imagePrompt: 'Professional anti-scam awareness closing frame, cyber safety visual, cinematic vertical 9:16, no text, no logo' }].filter(Boolean);
     const imagePaths: string[] = [];
     await withStage(schedule, 'video_scene_image_generation', async () => {
       for (let i = 0; i < scenePlan.length; i++) {
