@@ -128,6 +128,7 @@ export async function renderVideoViaSupabaseFunction(payload: {
   const { key } = getConfig();
   let response: any = null;
   let lastError: any = null;
+  let usedUrl = "";
 
   for (const fnUrl of fnUrls) {
     try {
@@ -146,7 +147,8 @@ export async function renderVideoViaSupabaseFunction(payload: {
           timeout: 600_000,
         }
       );
-      console.info(`[render:${payload.jobId}] supabase_function_url=${fnUrl} status=${response.status}`);
+      usedUrl = fnUrl;
+      console.info(`[render:${payload.jobId}] render_provider=supabase_only supabase_function_url=${fnUrl} status=${response.status}`);
       break;
     } catch (error: any) {
       lastError = error;
@@ -173,8 +175,19 @@ export async function renderVideoViaSupabaseFunction(payload: {
   await fs.ensureDir(path.dirname(localOutput));
   await fs.writeFile(localOutput, Buffer.from(download.data));
 
+
+  const renderStatus = String(response?.data?.status || response?.data?.result?.status || 'success');
+  const renderLogs = response?.data?.logs || response?.data?.result?.logs || null;
+  if (renderLogs) {
+    console.info(`[render:${payload.jobId}] render_provider=supabase_only render_logs=${JSON.stringify(renderLogs)}`);
+  }
   return {
     localOutput,
     tempPaths: [uploadedAudio, ...uploadedImages, renderedPath],
+    outputPath: renderedPath,
+    renderProvider: "supabase_only",
+    renderStatus,
+    renderLogs,
+    functionUrl: usedUrl,
   };
 }

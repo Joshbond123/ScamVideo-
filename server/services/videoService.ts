@@ -1,7 +1,3 @@
-import ffmpeg from 'fluent-ffmpeg';
-import ffmpegPath from 'ffmpeg-static';
-import ffprobeStatic from 'ffprobe-static';
-import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs-extra';
 import axios from 'axios';
@@ -10,13 +6,6 @@ import { resolveCloudflareAccountId, withKeyFailover } from './keyService';
 import { readJson, PATHS } from '../db';
 import { deleteSupabaseAssets, pruneSupabaseTempAssets, renderVideoViaSupabaseFunction } from './supabaseStorage';
 
-if (ffmpegPath) {
-  ffmpeg.setFfmpegPath(ffmpegPath);
-}
-
-if (ffprobeStatic?.path) {
-  ffmpeg.setFfprobePath(ffprobeStatic.path);
-}
 
 type GeneratedScript = {
   title: string;
@@ -344,168 +333,13 @@ export async function generatePostImageWithTitleOverlay(prompt: string, title: s
   return addTitleOverlayToImage(imagePath, title);
 }
 
-async function getAudioDurationSec(audioPath: string): Promise<number> {
-  return await new Promise<number>((resolve, reject) => {
-    ffmpeg.ffprobe(audioPath, (err, data) => {
-      if (err) return reject(err);
-      const duration = Number(data?.format?.duration || 0);
-      resolve(Number.isFinite(duration) && duration > 0 ? duration : 0);
-    });
-  });
-}
-
-function sanitizeSubtitleLine(line: string) {
-  return line
-    .replace(/[‘’]/g, "'")
-    .replace(/[–—‑]/g, '-')
-    .replace(/[^a-zA-Z0-9\s.,!?'-]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function toAssTime(seconds: number) {
-  const total = Math.max(0, seconds);
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = Math.floor(total % 60);
-  const cs = Math.floor((total - Math.floor(total)) * 100);
-  return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
-}
-
-function chunkSubtitlePhrase(line: string, wordsPerChunk = 4) {
-  const words = sanitizeSubtitleLine(line).split(' ').filter(Boolean);
-  if (!words.length) return [] as string[];
-  const chunks: string[] = [];
-  for (let i = 0; i < words.length; i += wordsPerChunk) {
-    chunks.push(words.slice(i, i + wordsPerChunk).join(' '));
-  }
-  return chunks;
-}
-
-async function buildSubtitleFilters(lines: string[], totalDurationSec: number, jobId: string) {
-  if (lines.length === 0 || totalDurationSec <= 0) return '';
-
-  const subtitleChunks = lines.flatMap((line) => chunkSubtitlePhrase(line));
-  if (!subtitleChunks.length) return '';
-  const perChunk = Math.max(totalDurationSec / subtitleChunks.length, 0.45);
-
-  const assPath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.ass`);
-  const assLines = [
-    '[Script Info]',
-    'ScriptType: v4.00+',
-    'PlayResX: 1080',
-    'PlayResY: 1920',
-    '',
-    '[V4+ Styles]',
-    'Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding',
-    'Style: Viral,Arial,62,&H00FFFFFF,&H0000FFFF,&H00332200,&H55000000,1,0,0,0,100,100,0,0,3,3,0,2,70,70,120,1',
-    '',
-    '[Events]',
-    'Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text',
-  ];
-
-  subtitleChunks.forEach((line, i) => {
-    const start = toAssTime(i * perChunk);
-    const end = toAssTime((i + 1) * perChunk);
-    const text = line.replace(/,/g, '\\,').replace(/\{/g, '(').replace(/\}/g, ')');
-    assLines.push(`Dialogue: 0,${start},${end},Viral,,0,0,0,,${text}`);
-  });
-
-  await fs.writeFile(assPath, assLines.join('\n'), 'utf8');
-
-  const escapedPath = assPath.replace(/\\/g, '/').replace(/:/g, '\\:');
-  return `subtitles='${escapedPath}'`;
-}
-
-async function runFfmpegCommand(jobId: string, args: string[]) {
-  const ffmpegBin = ffmpegPath || 'ffmpeg';
-  console.info(`[render:${jobId}] ffmpeg_cmd=${[ffmpegBin, ...args].join(' ')}`);
-
-  await new Promise<void>((resolve, reject) => {
-    const proc = spawn(ffmpegBin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    proc.stdout.on('data', (chunk) => console.info(`[render:${jobId}] ffmpeg_stdout=${String(chunk).trim()}`));
-    proc.stderr.on('data', (chunk) => console.info(`[render:${jobId}] ffmpeg_stderr=${String(chunk).trim()}`));
-    proc.on('error', reject);
-    proc.on('close', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`ffmpeg exited with code ${code}`));
-    });
-  });
-}
-
-async function assembleVideoLocally(jobId: string, audioPath: string, imagePaths: string[], subtitleLines: string[]) {
-  const outputPath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.mp4`);
-  await fs.ensureDir(path.dirname(outputPath));
-  const totalDurationSec = await getAudioDurationSec(audioPath);
-
-  if (!imagePaths.length) throw new Error('No scene images provided for FFmpeg render');
-  const sceneDuration = Math.max(totalDurationSec / imagePaths.length, 2.4);
-  const concatPath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.images.txt`);
-
-  const concatLines: string[] = [];
-  imagePaths.forEach((img) => {
-    const escaped = img.replace(/'/g, `'\\''`);
-    concatLines.push(`file '${escaped}'`);
-    concatLines.push(`duration ${sceneDuration.toFixed(3)}`);
-  });
-  concatLines.push(`file '${imagePaths[imagePaths.length - 1].replace(/'/g, `'\\''`)}'`);
-  await fs.writeFile(concatPath, concatLines.join('\n'), 'utf8');
-
-  const subtitleFilter = await buildSubtitleFilters(subtitleLines, totalDurationSec, jobId);
-  const subtitleArg = subtitleFilter
-    ? `scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,${subtitleFilter}`
-    : 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920';
-
-  console.info(`[render:${jobId}] scene_count=${imagePaths.length} scene_duration=${sceneDuration.toFixed(3)} audio_duration=${totalDurationSec.toFixed(3)}`);
-  console.info(`[render:${jobId}] scene_inputs=${JSON.stringify(imagePaths)}`);
-
-  const args = [
-    '-y',
-    '-f', 'concat',
-    '-safe', '0',
-    '-i', concatPath,
-    '-i', audioPath,
-    '-filter:v', subtitleArg,
-    '-r', '30',
-    '-pix_fmt', 'yuv420p',
-    '-map', '0:v:0',
-    '-map', '1:a:0',
-    '-c:v', 'libx264',
-    '-c:a', 'aac',
-    '-b:a', '192k',
-    '-shortest',
-    outputPath,
-  ];
-
-  await runFfmpegCommand(jobId, args);
-
-  const metadata = await new Promise<{ duration: number; size: number }>((resolve, reject) => {
-    ffmpeg.ffprobe(outputPath, (err, data) => {
-      if (err) return reject(err);
-      resolve({
-        duration: Number(data?.format?.duration || 0),
-        size: Number(data?.format?.size || 0),
-      });
-    });
-  });
-
-  console.info(`[render:${jobId}] subtitles_burned=${Boolean(subtitleFilter)}`);
-  console.info(`[render:${jobId}] output_path=${outputPath} output_size=${metadata.size} duration_sec=${metadata.duration.toFixed(3)}`);
-  return outputPath;
-}
-
 export async function assembleVideo(jobId: string, audioPath: string, imagePaths: string[], subtitleLines: string[]) {
-  try {
-    const remote = await renderVideoViaSupabaseFunction({ jobId, audioPath, imagePaths, subtitleLines });
-    if (remote?.localOutput) {
-      return remote.localOutput;
-    }
-    throw new Error(`[render:${jobId}] Supabase render returned no outputPath`);
-  } catch (error) {
-    console.warn(`[render:${jobId}] Supabase render unavailable; using local FFmpeg fallback`, error);
+  console.info(`[render:${jobId}] render_provider=supabase_only`);
+  const remote = await renderVideoViaSupabaseFunction({ jobId, audioPath, imagePaths, subtitleLines });
+  if (!remote?.localOutput) {
+    throw new Error(`[render:${jobId}] render_provider=supabase_only failed: missing outputPath/localOutput`);
   }
-
-  return assembleVideoLocally(jobId, audioPath, imagePaths, subtitleLines);
+  return remote.localOutput;
 }
 
 export async function uploadToCatbox(filePath: string) {
@@ -531,9 +365,7 @@ export async function cleanupJobAssets(jobId: string) {
   const audioPath = path.join(process.cwd(), 'database/assets/audio', `${jobId}.mp3`);
   const imageDir = path.join(process.cwd(), 'database/assets/images', jobId);
   const videoPath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.mp4`);
-  const subtitlePath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.ass`);
-
-  await Promise.all([fs.remove(audioPath), fs.remove(imageDir), fs.remove(videoPath), fs.remove(subtitlePath)]);
+  await Promise.all([fs.remove(audioPath), fs.remove(imageDir), fs.remove(videoPath)]);
 
   try {
     await deleteSupabaseAssets([
