@@ -46,6 +46,11 @@ const STAGE_TIMEOUTS_MS: Record<string, number> = {
 
 let schedulerTimer: NodeJS.Timeout | null = null;
 let isTickRunning = false;
+const inFlightJobs = new Set<string>();
+
+function getJobKey(schedule: Pick<Schedule, 'id' | 'type'>) {
+  return `${schedule.type}:${schedule.id}`;
+}
 
 function getScheduleSortTime(schedule: Schedule) {
   const primary = schedule.createdAt || schedule.scheduledAt;
@@ -280,7 +285,18 @@ async function processDueSchedules() {
     }
 
     for (const schedule of due) {
-      await runJob(schedule);
+      const jobKey = getJobKey(schedule);
+      if (inFlightJobs.has(jobKey)) continue;
+
+      inFlightJobs.add(jobKey);
+      runJob(schedule)
+        .catch((error) => {
+          console.error(`Background job execution failed for ${jobKey}:`, error);
+        })
+        .finally(() => {
+          inFlightJobs.delete(jobKey);
+          requestSchedulerRefresh();
+        });
     }
   } finally {
     isTickRunning = false;
@@ -293,8 +309,13 @@ async function computeNextWakeDelayMs(): Promise<number | null> {
     readJson<Schedule[]>(PATHS.schedules.post).then((rows) => rows.map((s) => ({ ...s, type: 'post' as const }))),
   ]);
 
-  const pending = [...videoSchedules, ...postSchedules].filter((s) => s.status === 'pending');
-  if (!pending.length) return null;
+  const allSchedules = [...videoSchedules, ...postSchedules];
+  const pending = allSchedules.filter((s) => s.status === 'pending');
+  const generating = allSchedules.filter((s) => s.status === 'generating');
+
+  if (!pending.length) {
+    return generating.length || inFlightJobs.size ? SCHEDULER_TICK_MS : null;
+  }
 
   const now = Date.now();
   const nextTs = Math.min(...pending.map((s) => new Date(s.scheduledAt).getTime()));

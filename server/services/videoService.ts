@@ -34,13 +34,6 @@ type OverlayAssetType = 'post_image' | 'video_scene';
 const UNREAL_VOICES = ['Oliver', 'Noah', 'Ethan', 'Daniel'];
 const voiceMetaByJob = new Map<string, VoiceoverMeta>();
 
-function toSeconds(value: unknown) {
-  const raw = Number(value);
-  if (!Number.isFinite(raw)) return Number.NaN;
-  if (raw >= 1_000) return raw / 1_000;
-  return raw;
-}
-
 function detectTimestampScale(raw: any): 1 | 0.001 {
   if (!Array.isArray(raw) || !raw.length) return 1;
   const numbers: number[] = [];
@@ -58,9 +51,9 @@ function detectTimestampScale(raw: any): 1 | 0.001 {
 }
 
 function scaleTiming(value: unknown, scale: 1 | 0.001) {
-  const seconds = toSeconds(value);
-  if (!Number.isFinite(seconds)) return Number.NaN;
-  return seconds * scale;
+  const raw = Number(value);
+  if (!Number.isFinite(raw)) return Number.NaN;
+  return raw * scale;
 }
 
 
@@ -268,21 +261,37 @@ function buildSubtitleEventsFromWords(words: VoiceTimingWord[]) {
 }
 
 
-function normalizeSubtitleEvents(events: Array<{ text: string; start: number; end: number }>) {
+function normalizeSubtitleEvents(events: Array<{ text: string; start: number; end: number }>, maxDurationSec?: number) {
   const sorted = [...events].sort((a, b) => a.start - b.start);
   const normalized: Array<{ text: string; start: number; end: number }> = [];
+  const cap = Number.isFinite(maxDurationSec) ? Math.max(0.5, Number(maxDurationSec)) : Number.POSITIVE_INFINITY;
 
   for (const ev of sorted) {
     const rawText = String(ev.text || '').replace(/\s+/g, ' ').trim();
     if (!rawText) continue;
 
     const previousEnd = normalized.length ? normalized[normalized.length - 1].end : 0;
-    const start = Math.max(Number(ev.start) || 0, previousEnd + 0.02);
-    const end = Math.max(Number(ev.end) || 0, start + 0.32);
+    const rawStart = Math.max(0, Number(ev.start) || 0);
+    const rawEnd = Math.max(rawStart + 0.05, Number(ev.end) || 0);
+    const start = Math.min(cap - 0.3, Math.max(rawStart, previousEnd + 0.02));
+    const end = Math.min(cap, Math.max(rawEnd, start + 0.32));
+    if (end <= start) continue;
     normalized.push({ text: rawText.toUpperCase(), start, end });
   }
 
   return normalized;
+}
+
+function buildSubtitleEventsFromLines(lines: string[], durationSec: number) {
+  const clean = lines.map((l) => String(l || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+  if (!clean.length || !Number.isFinite(durationSec) || durationSec <= 0) return [] as Array<{ text: string; start: number; end: number }>;
+
+  const span = durationSec / clean.length;
+  return clean.map((text, idx) => {
+    const start = idx * span;
+    const end = idx === clean.length - 1 ? durationSec : (idx + 1) * span;
+    return { text, start, end };
+  });
 }
 
 
@@ -307,7 +316,9 @@ async function writeAssSubtitle(jobId: string, events: Array<{ text: string; sta
     '',
     '[V4+ Styles]',
     'Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding',
-    'Style: Viral,Arial,76,&H00FFFFFF,&H00FFFFFF,&H00202020,&H00000000,1,0,0,0,100,100,0,0,1,4,0,5,70,70,40,1',
+    // Keep captions in a social-safe area above the lower UI overlays used by Facebook/Reels.
+    // BorderStyle=3 + BackColour provides a readable box on bright scenes.
+    'Style: Viral,Arial,66,&H00FFFFFF,&H00FFFFFF,&H00000000,&H88000000,1,0,0,0,100,100,0,0,3,0,0,2,80,80,420,1',
     '',
     '[Events]',
     'Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text',
@@ -633,6 +644,7 @@ export async function assembleVideo(jobId: string, audioPath: string, imagePaths
   console.info(`[render:${jobId}] render_provider=local_ffmpeg_with_supabase_fallback`);
 
   const meta = voiceMetaByJob.get(jobId);
+  const durationSec = Math.max(3, Number(meta?.durationSec || 0) || imagePaths.length * 3);
   let subtitleEvents: Array<{ text: string; start: number; end: number }> = [];
   let subtitleAssPath = '';
 
@@ -640,17 +652,22 @@ export async function assembleVideo(jobId: string, audioPath: string, imagePaths
     console.info(`[render:${jobId}] timing_data:using_words=${meta.words.length} source=${meta.timingSource}`);
     const timingSample = meta.words.slice(0, 5).map((w) => `${w.word}:${w.start.toFixed(2)}-${w.end.toFixed(2)}`).join('|');
     console.info(`[render:${jobId}] timing_data_sample=${timingSample}`);
-    subtitleEvents = normalizeSubtitleEvents(buildSubtitleEventsFromWords(meta.words));
+    subtitleEvents = normalizeSubtitleEvents(buildSubtitleEventsFromWords(meta.words), durationSec);
     subtitleAssPath = await writeAssSubtitle(jobId, subtitleEvents);
     console.info(`[render:${jobId}] subtitle_file=${subtitleAssPath} subtitle_events=${subtitleEvents.length}`);
   } else if (meta?.sentences?.length) {
     const timingSample = meta.sentences.slice(0, 3).map((s) => `${s.text.slice(0, 20)}:${s.start.toFixed(2)}-${s.end.toFixed(2)}`).join('|');
     console.info(`[render:${jobId}] timing_data:using_sentences=${meta.sentences.length} source=${meta.timingSource} sample=${timingSample}`);
-    subtitleEvents = normalizeSubtitleEvents(meta.sentences.map((s) => ({ text: s.text, start: s.start, end: s.end })));
+    subtitleEvents = normalizeSubtitleEvents(meta.sentences.map((s) => ({ text: s.text, start: s.start, end: s.end })), durationSec);
     subtitleAssPath = await writeAssSubtitle(jobId, subtitleEvents);
     console.info(`[render:${jobId}] subtitle_file=${subtitleAssPath} subtitle_events=${subtitleEvents.length}`);
   } else {
-    console.warn(`[render:${jobId}] missing timing metadata; rendering without burned subtitles`);
+    console.warn(`[render:${jobId}] missing timing metadata; attempting subtitleLines duration fallback`);
+    subtitleEvents = normalizeSubtitleEvents(buildSubtitleEventsFromLines(subtitleLines, durationSec), durationSec);
+    if (subtitleEvents.length) {
+      subtitleAssPath = await writeAssSubtitle(jobId, subtitleEvents);
+      console.info(`[render:${jobId}] subtitle_fallback=subtitle_lines duration_sec=${durationSec.toFixed(2)} subtitle_events=${subtitleEvents.length}`);
+    }
   }
 
   if (subtitleEvents.length) {
