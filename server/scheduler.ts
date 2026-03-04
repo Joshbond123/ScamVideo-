@@ -1,5 +1,4 @@
 import axios from 'axios';
-import ffmpegStatic from 'ffmpeg-static';
 import { readJson, updateJson, PATHS } from './db';
 import { Schedule, ApiKey } from '../src/types';
 import { discoverTopics, getUniqueTopic } from './services/topicService';
@@ -151,7 +150,7 @@ async function validateRequiredConfig(schedule: Schedule) {
 
   const missing: string[] = [];
 
-  const keyProviders: ApiKey['provider'][] = schedule.type === 'video' ? ['cerebras', 'unrealspeech'] : ['cerebras'];
+  const keyProviders: ApiKey['provider'][] = schedule.type === 'video' ? ['cerebras', 'unrealspeech', 'workers-ai'] : ['cerebras', 'workers-ai'];
   for (const provider of keyProviders) {
     const active = await getActiveKeys(provider);
     if (!active.length) missing.push(`api_key:${provider}`);
@@ -163,24 +162,13 @@ async function validateRequiredConfig(schedule: Schedule) {
   if (!settings?.catboxHash) missing.push('catboxHash');
 
   const cloudflareAccountId = await resolveCloudflareAccountId();
-  if (!cloudflareAccountId) {
-    await logEvent(schedule.type, 'info', 'cloudflare_account_id_missing: workers-ai disabled, using image fallbacks', schedule.niche);
-  }
+  if (!cloudflareAccountId) missing.push('cloudflare_account_id');
 
   if (schedule.type === 'video') {
     try {
       await validateSupabaseRenderFunctionEndpoint();
     } catch (error: any) {
-      if (ffmpegStatic) {
-        await logEvent(
-          schedule.type,
-          'info',
-          `supabase_render_function_unavailable:local_ffmpeg_fallback_enabled message=${error?.message || error}`,
-          schedule.niche
-        );
-      } else {
-        missing.push(`supabase_render_function:${error?.message || error}`);
-      }
+      missing.push(`supabase_render_function:${error?.message || error}`);
     }
   }
 
@@ -475,7 +463,7 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
     const imagePaths: string[] = [];
     await withStage(schedule, 'video_scene_image_generation', async () => {
       for (let i = 0; i < scenePlan.length; i++) {
-        const prompt = `${scenePlan[i].imagePrompt}. Vertical 9:16 composition. No text, words, letters, numbers, subtitles, captions, watermarks, logos, or signage.`;
+        const prompt = `${scenePlan[i].imagePrompt}. Vertical 9:16 composition. No text, words, watermarks, logos.`;
         const imgPath = await generateImage(prompt, jobId, i);
         imagePaths.push(imgPath);
       }
@@ -523,12 +511,7 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
       ]);
     });
   } finally {
-    try {
-      await withStage(schedule, 'video_cleanup_assets', async () => cleanupJobAssets(jobId));
-    } catch (error: any) {
-      const e = normalizeError(error);
-      await logEvent(schedule.type, 'error', `cleanup_non_fatal id=${schedule.id} message=${e.message}`, schedule.niche);
-    }
+    await withStage(schedule, 'video_cleanup_assets', async () => cleanupJobAssets(jobId));
   }
 }
 
