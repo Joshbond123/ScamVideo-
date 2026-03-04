@@ -2,8 +2,6 @@ import path from 'path';
 import fs from 'fs-extra';
 import axios from 'axios';
 import FormData from 'form-data';
-import { spawn } from 'child_process';
-import ffmpegStatic from 'ffmpeg-static';
 import { resolveCloudflareAccountId, withKeyFailover } from './keyService';
 import { readJson, PATHS } from '../db';
 import { deleteSupabaseAssets, pruneSupabaseTempAssets, renderVideoViaSupabaseFunction } from './supabaseStorage';
@@ -20,54 +18,15 @@ type GeneratedScript = {
 };
 
 type VoiceTimingWord = { word: string; start: number; end: number };
-type VoiceTimingSentence = { text: string; start: number; end: number };
 type VoiceoverMeta = {
   voiceId: string;
   timingSource: string;
   words: VoiceTimingWord[];
-  sentences: VoiceTimingSentence[];
   durationSec: number;
 };
 
-type OverlayAssetType = 'post_image' | 'video_scene';
-
 const UNREAL_VOICES = ['Oliver', 'Noah', 'Ethan', 'Daniel'];
 const voiceMetaByJob = new Map<string, VoiceoverMeta>();
-
-function toSeconds(value: unknown) {
-  const raw = Number(value);
-  if (!Number.isFinite(raw)) return Number.NaN;
-  if (raw >= 1_000) return raw / 1_000;
-  return raw;
-}
-
-function detectTimestampScale(raw: any): 1 | 0.001 {
-  if (!Array.isArray(raw) || !raw.length) return 1;
-  const numbers: number[] = [];
-  for (const entry of raw) {
-    const values = [entry?.start, entry?.start_time, entry?.from, entry?.offset, entry?.end, entry?.end_time, entry?.to, entry?.duration]
-      .map((v) => Number(v))
-      .filter((v) => Number.isFinite(v));
-    numbers.push(...values);
-  }
-
-  if (!numbers.length) return 1;
-  const max = Math.max(...numbers);
-  // Speech clips are normally << 10 minutes. Very large timing values indicate ms-based timestamps.
-  return max > 600 ? 0.001 : 1;
-}
-
-function scaleTiming(value: unknown, scale: 1 | 0.001) {
-  const seconds = toSeconds(value);
-  if (!Number.isFinite(seconds)) return Number.NaN;
-  return seconds * scale;
-}
-
-
-function sanitizeVideoImagePrompt(prompt: string) {
-  const base = String(prompt || '').replace(/\s+/g, ' ').trim();
-  return `${base}. Cinematic photoreal scene, visual storytelling only. Absolutely no readable text, letters, words, numbers, captions, subtitles, logos, signs, UI labels, or watermarks in the image.`;
-}
 
 function extractJsonObject(raw: string) {
   const trimmed = raw.trim();
@@ -182,32 +141,15 @@ export async function generateFacebookComment(title: string, caption: string, to
 
 function normalizeWordTimings(raw: any): VoiceTimingWord[] {
   if (!Array.isArray(raw)) return [];
-  const scale = detectTimestampScale(raw);
   return raw
     .map((entry: any) => {
       const word = String(entry?.word || entry?.text || '').trim();
-      const start = scaleTiming(entry?.start ?? entry?.start_time ?? entry?.from ?? entry?.offset, scale);
-      const duration = scaleTiming(entry?.duration, scale);
-      const end = scaleTiming(entry?.end ?? entry?.end_time ?? entry?.to ?? (Number.isFinite(start) ? start + duration : Number.NaN), scale);
+      const start = Number(entry?.start ?? entry?.start_time ?? entry?.from ?? entry?.offset);
+      const end = Number(entry?.end ?? entry?.end_time ?? entry?.to ?? (Number.isFinite(start) ? start + Number(entry?.duration || 0) : NaN));
       if (!word || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
       return { word, start, end };
     })
     .filter(Boolean) as VoiceTimingWord[];
-}
-
-function normalizeSentenceTimings(raw: any): VoiceTimingSentence[] {
-  if (!Array.isArray(raw)) return [];
-  const scale = detectTimestampScale(raw);
-  return raw
-    .map((entry: any) => {
-      const text = String(entry?.text || entry?.sentence || '').trim();
-      const start = scaleTiming(entry?.start ?? entry?.start_time ?? entry?.from ?? entry?.offset, scale);
-      const duration = scaleTiming(entry?.duration, scale);
-      const end = scaleTiming(entry?.end ?? entry?.end_time ?? entry?.to ?? (Number.isFinite(start) ? start + duration : Number.NaN), scale);
-      if (!text || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
-      return { text, start, end };
-    })
-    .filter(Boolean) as VoiceTimingSentence[];
 }
 
 function chooseRandomVoice() {
@@ -225,74 +167,15 @@ function toAssTime(seconds: number) {
 
 function buildSubtitleEventsFromWords(words: VoiceTimingWord[]) {
   const events: Array<{ text: string; start: number; end: number }> = [];
-  const maxWordsPerChunk = 3;
-  const punctuationBreak = /[.!?,;:]$/;
-  const hardCharLimit = 22;
-
-  let i = 0;
-  while (i < words.length) {
-    const chunk: VoiceTimingWord[] = [];
-    let charCount = 0;
-
-    while (i < words.length && chunk.length < maxWordsPerChunk) {
-      const candidate = words[i];
-      if (!candidate) break;
-      const nextCharCount = charCount + (chunk.length ? 1 : 0) + candidate.word.length;
-
-      if (chunk.length && nextCharCount > hardCharLimit) break;
-
-      chunk.push(candidate);
-      charCount = nextCharCount;
-      i += 1;
-
-      if (punctuationBreak.test(candidate.word)) break;
-    }
-
-    if (!chunk.length) {
-      i += 1;
-      continue;
-    }
-
-    const start = chunk[0].start;
-    const naturalEnd = chunk[chunk.length - 1].end;
-    const next = words[i];
-    const boundedEnd = next ? Math.min(naturalEnd, Math.max(start + 0.2, next.start - 0.02)) : naturalEnd;
+  for (let i = 0; i < words.length; i += 3) {
+    const chunk = words.slice(i, i + 3);
     events.push({
       text: chunk.map((w) => w.word).join(' '),
-      start,
-      end: Math.max(boundedEnd, start + 0.28),
+      start: chunk[0].start,
+      end: chunk[chunk.length - 1].end,
     });
   }
-
   return events;
-}
-
-
-function normalizeSubtitleEvents(events: Array<{ text: string; start: number; end: number }>) {
-  const sorted = [...events].sort((a, b) => a.start - b.start);
-  const normalized: Array<{ text: string; start: number; end: number }> = [];
-
-  for (const ev of sorted) {
-    const rawText = String(ev.text || '').replace(/\s+/g, ' ').trim();
-    if (!rawText) continue;
-
-    const previousEnd = normalized.length ? normalized[normalized.length - 1].end : 0;
-    const start = Math.max(Number(ev.start) || 0, previousEnd + 0.02);
-    const end = Math.max(Number(ev.end) || 0, start + 0.32);
-    normalized.push({ text: rawText.toUpperCase(), start, end });
-  }
-
-  return normalized;
-}
-
-
-function summarizeSubtitleTimeline(events: Array<{ text: string; start: number; end: number }>) {
-  if (!events.length) return { count: 0, firstStart: 0, lastEnd: 0 };
-  return {
-    count: events.length,
-    firstStart: events[0].start,
-    lastEnd: events[events.length - 1].end,
-  };
 }
 
 async function writeAssSubtitle(jobId: string, events: Array<{ text: string; start: number; end: number }>) {
@@ -307,7 +190,7 @@ async function writeAssSubtitle(jobId: string, events: Array<{ text: string; sta
     '',
     '[V4+ Styles]',
     'Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding',
-    'Style: Viral,Arial,76,&H00FFFFFF,&H00FFFFFF,&H00202020,&H00000000,1,0,0,0,100,100,0,0,1,4,0,5,70,70,40,1',
+    'Style: Viral,Arial,58,&H00FFFFFF,&H0000FFFF,&H00332200,&H66000000,1,0,0,0,100,100,0,0,3,3,0,2,60,60,120,1',
     '',
     '[Events]',
     'Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text',
@@ -319,13 +202,6 @@ async function writeAssSubtitle(jobId: string, events: Array<{ text: string; sta
   }
 
   await fs.writeFile(assPath, ass.join('\n'), 'utf8');
-  const subtitleContent = await fs.readFile(assPath, 'utf8');
-  const subtitleStats = await fs.stat(assPath);
-  const dialogueLines = subtitleContent
-    .split(/\r?\n/)
-    .filter((line) => line.startsWith('Dialogue:'))
-    .length;
-  console.info(`[subtitle:${jobId}] ass_created path=${assPath} subtitle_size_bytes=${subtitleStats.size} dialogue_lines=${dialogueLines}`);
   return assPath;
 }
 
@@ -357,59 +233,37 @@ export async function generateVoiceover(text: string, jobId: string) {
 
     const audioUrl = String(response.data?.AudioUrl || response.data?.audio_url || response.data?.OutputUri || '');
     const timestampsUri = String(response.data?.TimestampsUri || response.data?.timestamps_uri || '');
-    const initialWordRaw = response.data?.Timestamps || response.data?.timestamps || response.data?.word_timestamps || [];
-    const initialSentenceRaw = response.data?.SentenceTimestamps || response.data?.sentence_timestamps || [];
-    let timings = normalizeWordTimings(initialWordRaw);
-    let sentenceTimings = normalizeSentenceTimings(initialSentenceRaw);
-    const initialWordScale = detectTimestampScale(initialWordRaw) === 0.001 ? 'ms' : 'sec';
-    const initialSentenceScale = detectTimestampScale(initialSentenceRaw) === 0.001 ? 'ms' : 'sec';
-    console.info(`[voiceover:${jobId}] timing_data:initial_word_count=${timings.length} initial_sentence_count=${sentenceTimings.length} source=response_payload`);
-    console.info(`[voiceover:${jobId}] timing_unit_detected response_words=${initialWordScale} response_sentences=${initialSentenceScale}`);
+    let timings = normalizeWordTimings(response.data?.Timestamps || response.data?.timestamps || response.data?.word_timestamps || []);
 
     if (!audioUrl) throw new Error(`UnrealSpeech response missing audio URL: ${JSON.stringify(response.data || {})}`);
 
-    if ((!timings.length || !sentenceTimings.length) && timestampsUri) {
+    if (!timings.length && timestampsUri) {
       const tsResp = await axios.get(timestampsUri, { timeout: 120_000 });
-      const uriWordRaw = tsResp.data?.timestamps || tsResp.data?.words || tsResp.data || [];
-      const uriSentenceRaw = tsResp.data?.timestamps || tsResp.data?.sentences || tsResp.data || [];
-      timings = normalizeWordTimings(uriWordRaw);
-      sentenceTimings = normalizeSentenceTimings(uriSentenceRaw);
-      const uriWordScale = detectTimestampScale(uriWordRaw) === 0.001 ? 'ms' : 'sec';
-      const uriSentenceScale = detectTimestampScale(uriSentenceRaw) === 0.001 ? 'ms' : 'sec';
-      console.info(`[voiceover:${jobId}] timing_data:loaded_from_uri=${timestampsUri} word_count=${timings.length} sentence_count=${sentenceTimings.length}`);
-      console.info(`[voiceover:${jobId}] timing_unit_detected uri_words=${uriWordScale} uri_sentences=${uriSentenceScale}`);
+      timings = normalizeWordTimings(tsResp.data?.timestamps || tsResp.data?.words || tsResp.data || []);
     }
+
+    if (!timings.length) throw new Error(`UnrealSpeech response missing word timestamps: ${JSON.stringify(response.data || {})}`);
 
     const audioResp = await axios.get(audioUrl, { responseType: 'arraybuffer', timeout: 120_000 });
     await fs.writeFile(filePath, Buffer.from(audioResp.data));
-
-    if (!timings.length && !sentenceTimings.length) {
-      console.warn(`[voiceover:${jobId}] UnrealSpeech returned audio without timing data; rendering will continue without burned subtitles.`);
-    }
 
     return {
       filePath,
       voiceId,
       words: timings,
-      sentences: sentenceTimings,
-      timingSource: timings.length
-        ? (timestampsUri ? 'unrealspeech_timestamps_uri_word' : 'unrealspeech_word_timestamps')
-        : sentenceTimings.length
-          ? (timestampsUri ? 'unrealspeech_timestamps_uri_sentence' : 'unrealspeech_sentence_timestamps')
-          : 'none',
-      durationSec: Number(timings[timings.length - 1]?.end || sentenceTimings[sentenceTimings.length - 1]?.end || 0),
+      timingSource: timestampsUri ? 'unrealspeech_timestamps_uri' : 'unrealspeech_word_timestamps',
+      durationSec: Number(timings[timings.length - 1].end || 0),
     };
   });
 
   voiceMetaByJob.set(jobId, {
     voiceId: out.voiceId,
     words: out.words,
-    sentences: out.sentences,
     timingSource: out.timingSource,
     durationSec: out.durationSec,
   });
 
-  console.info(`[voiceover:${jobId}] selected_voice=${out.voiceId} timing_source=${out.timingSource} words=${out.words.length} sentences=${out.sentences.length} timestamps_received=${out.words.length || out.sentences.length} duration_sec=${out.durationSec.toFixed(2)}`);
+  console.info(`[voiceover:${jobId}] selected_voice=${out.voiceId} timing_source=${out.timingSource} words=${out.words.length} duration_sec=${out.durationSec.toFixed(2)}`);
   return out.filePath;
 }
 
@@ -433,8 +287,7 @@ async function generateImageWithPollinations(prompt: string, jobId: string, scen
   await fs.ensureDir(dir);
   const filePath = path.join(dir, `scene_${sceneIdx}.png`);
 
-  const strictPrompt = sanitizeVideoImagePrompt(prompt);
-  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(strictPrompt)}?width=1080&height=1920&nologo=true`;
+  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1080&height=1920&nologo=true`;
   const response = await axios.get(url, {
     responseType: 'arraybuffer',
     timeout: 60_000,
@@ -447,227 +300,68 @@ async function generateImageWithPollinations(prompt: string, jobId: string, scen
 
 export async function generateImage(prompt: string, jobId: string, sceneIdx: number) {
   const accountId = await resolveCloudflareAccountId();
-
-  if (accountId) {
-    try {
-      return await withKeyFailover('workers-ai', async (key) => {
-        const response = await axios.post(
-          `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/black-forest-labs/flux-1-schnell`,
-          {
-            prompt: sanitizeVideoImagePrompt(prompt),
-            negative_prompt: 'text, words, letters, numbers, captions, subtitles, logo, watermark, signage, UI',
-            steps: 6,
-          },
-          {
-            headers: { Authorization: `Bearer ${key.key}`, 'Content-Type': 'application/json' },
-            timeout: 60_000,
-          }
-        );
-
-        const dir = path.join(process.cwd(), 'database/assets/images', jobId);
-        await fs.ensureDir(dir);
-        const filePath = path.join(dir, `scene_${sceneIdx}.png`);
-
-        const base64 = response?.data?.result?.image || response?.data?.image;
-        if (!base64 || typeof base64 !== 'string') {
-          throw new Error(`Workers AI response missing image payload: ${JSON.stringify(response?.data || {})}`);
-        }
-
-        await fs.writeFile(filePath, Buffer.from(base64, 'base64'));
-        return filePath;
-      });
-    } catch (error) {
-      console.warn(`[image:${jobId}:${sceneIdx}] Workers AI failed; falling back to Pollinations:`, error);
-    }
-  } else {
-    console.warn(`[image:${jobId}:${sceneIdx}] Cloudflare account id missing; skipping Workers AI and using fallbacks.`);
+  if (!accountId) {
+    throw new Error('Cloudflare account id missing. Set CLOUDFLARE_ACCOUNT_ID or save settings.cloudflareAccountId or config/CLOUDFLARE_ACCOUNT_ID in Supabase api_keys.');
   }
 
   try {
-    return await generateImageWithPollinations(prompt, jobId, sceneIdx);
-  } catch (fallbackError) {
-    console.warn(`[image:${jobId}:${sceneIdx}] Pollinations failed; using local placeholder image:`, fallbackError);
-    return generateLocalPlaceholderImage(jobId, sceneIdx);
-  }
-}
+    return await withKeyFailover('workers-ai', async (key) => {
+      const response = await axios.post(
+        `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/black-forest-labs/flux-1-schnell`,
+        {
+          prompt,
+          steps: 6,
+        },
+        {
+          headers: { Authorization: `Bearer ${key.key}`, 'Content-Type': 'application/json' },
+          timeout: 60_000,
+        }
+      );
 
+      const dir = path.join(process.cwd(), 'database/assets/images', jobId);
+      await fs.ensureDir(dir);
+      const filePath = path.join(dir, `scene_${sceneIdx}.png`);
 
-async function renderVideoLocallyWithFfmpeg(args: string[]) {
-  if (!ffmpegStatic) throw new Error('ffmpeg-static binary is unavailable for this platform');
+      const base64 = response?.data?.result?.image || response?.data?.image;
+      if (!base64 || typeof base64 !== 'string') {
+        throw new Error(`Workers AI response missing image payload: ${JSON.stringify(response?.data || {})}`);
+      }
 
-  return await new Promise<string>((resolve, reject) => {
-    const proc = spawn(ffmpegStatic, args, { stdio: ['ignore', 'ignore', 'pipe'] });
-    let stderr = '';
-
-    proc.stderr.on('data', (chunk) => {
-      stderr += chunk.toString();
+      await fs.writeFile(filePath, Buffer.from(base64, 'base64'));
+      return filePath;
     });
-
-    proc.on('error', (error) => reject(error));
-    proc.on('close', (code) => {
-      if (code === 0) return resolve(stderr);
-      reject(new Error(`ffmpeg exited with code ${code}: ${stderr.slice(-4000)}`));
-    });
-  });
-}
-
-
-async function detectLocalLibassSupport() {
-  if (!ffmpegStatic) return false;
-  return await new Promise<boolean>((resolve) => {
-    const proc = spawn(ffmpegStatic, ['-hide_banner', '-filters'], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let output = '';
-
-    proc.stdout.on('data', (chunk) => {
-      output += chunk.toString();
-    });
-
-    proc.stderr.on('data', (chunk) => {
-      output += chunk.toString();
-    });
-
-    proc.on('close', (code) => {
-      resolve(code === 0 && /\bass\b/.test(output) && /\bsubtitles\b/.test(output));
-    });
-    proc.on('error', () => resolve(false));
-  });
-}
-
-async function assembleVideoLocally(jobId: string, audioPath: string, imagePaths: string[], subtitleAssPath?: string) {
-  const outputPath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.mp4`);
-  await fs.ensureDir(path.dirname(outputPath));
-
-  const concatFile = path.join(process.cwd(), 'database/assets/videos', `${jobId}_images.txt`);
-  const durationSec = Math.max(3, Number((voiceMetaByJob.get(jobId)?.durationSec || 0).toFixed(2)) || imagePaths.length * 3);
-  const perImage = Math.max(2.5, durationSec / Math.max(1, imagePaths.length));
-
-  const lines: string[] = [];
-  for (const img of imagePaths) {
-    const safePath = img.replace(/'/g, "'\''");
-    lines.push(`file '${safePath}'`);
-    lines.push(`duration ${perImage.toFixed(3)}`);
-  }
-  if (imagePaths.length) {
-    const last = imagePaths[imagePaths.length - 1].replace(/'/g, "'\''");
-    lines.push(`file '${last}'`);
-  }
-  await fs.writeFile(concatFile, lines.join('\n'), 'utf8');
-
-  const vfParts = ['scale=1080:1920:force_original_aspect_ratio=increase', 'crop=1080:1920', 'format=yuv420p'];
-  if (subtitleAssPath) {
-    const supportsLibass = await detectLocalLibassSupport();
-    console.info(`[render:${jobId}] ffmpeg_libass_support=${supportsLibass}`);
-    if (!supportsLibass) {
-      throw new Error('Local ffmpeg build does not support libass ass/subtitles filters');
+  } catch (error) {
+    console.warn(`[image:${jobId}:${sceneIdx}] Workers AI failed; falling back to Pollinations:`, error);
+    try {
+      return await generateImageWithPollinations(prompt, jobId, sceneIdx);
+    } catch (fallbackError) {
+      console.warn(`[image:${jobId}:${sceneIdx}] Pollinations failed; using local placeholder image:`, fallbackError);
+      return generateLocalPlaceholderImage(jobId, sceneIdx);
     }
-    const escaped = subtitleAssPath.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/,/g, '\\,');
-    vfParts.push(`ass='${escaped}'`);
   }
-
-  const ffmpegArgs = [
-    '-y',
-    '-f', 'concat',
-    '-safe', '0',
-    '-i', concatFile,
-    '-i', audioPath,
-    '-vf', vfParts.join(','),
-    '-r', '30',
-    '-c:v', 'libx264',
-    '-preset', 'veryfast',
-    '-pix_fmt', 'yuv420p',
-    '-c:a', 'aac',
-    '-b:a', '192k',
-    '-shortest',
-    outputPath,
-  ];
-
-  if (subtitleAssPath) {
-    const subtitleContent = await fs.readFile(subtitleAssPath, 'utf8');
-    const subtitleStats = await fs.stat(subtitleAssPath);
-    const subtitleLineCount = subtitleContent
-      .split(/\r?\n/)
-      .filter((line) => line.startsWith('Dialogue:'))
-      .length;
-    console.info(`[render:${jobId}] subtitle_file_path=${subtitleAssPath} subtitle_size_bytes=${subtitleStats.size} subtitle_line_count=${subtitleLineCount}`);
-  }
-
-  console.info(`[render:${jobId}] ffmpeg_command=${[String(ffmpegStatic), ...ffmpegArgs].join(' ')}`);
-  const ffmpegStderr = await renderVideoLocallyWithFfmpeg(ffmpegArgs);
-  console.info(`[render:${jobId}] ffmpeg_stderr_tail=${ffmpegStderr.slice(-4000)}`);
-  const ffmpegLibassLines = ffmpegStderr
-    .split(/\r?\n/)
-    .filter((line) => /libass|Parsed_ass|Added subtitle file|fontselect|font provider/i.test(line))
-    .slice(-20);
-  if (ffmpegLibassLines.length) {
-    console.info(`[render:${jobId}] ffmpeg_subtitle_messages=${JSON.stringify(ffmpegLibassLines)}`);
-  }
-
-  if (subtitleAssPath) {
-    console.info(`[render:${jobId}] subtitles_applied=true subtitle_source=${subtitleAssPath} burn_step_ran=true`);
-  } else {
-    console.info(`[render:${jobId}] subtitles_applied=false reason=no_subtitle_file burn_step_ran=true`);
-  }
-
-  await fs.remove(concatFile).catch(() => undefined);
-  return outputPath;
 }
 
-export async function addTitleOverlayToImage(imagePath: string, _title: string, assetType: OverlayAssetType) {
-  if (assetType !== 'post_image') {
-    console.warn(`[overlay] blocked assetType=${assetType} path=${imagePath}`);
-    return imagePath;
-  }
-
-  // Intentionally no-op for now. We keep this hook for post image pipeline only.
-  console.info(`[overlay] post_image overlay hook path=${imagePath}`);
+export async function addTitleOverlayToImage(imagePath: string, _title: string) {
   return imagePath;
 }
 
 export async function generatePostImageWithTitleOverlay(prompt: string, title: string, jobId: string) {
   const cleanPrompt = `${prompt}. No text, letters, words, logo, watermark, typography.`;
   const imagePath = await generateImage(cleanPrompt, jobId, 0);
-  return addTitleOverlayToImage(imagePath, title, 'post_image');
+  return addTitleOverlayToImage(imagePath, title);
 }
 
 export async function assembleVideo(jobId: string, audioPath: string, imagePaths: string[], subtitleLines: string[]) {
-  console.info(`[render:${jobId}] render_provider=local_ffmpeg_with_supabase_fallback`);
+  console.info(`[render:${jobId}] render_provider=supabase_only`);
 
   const meta = voiceMetaByJob.get(jobId);
-  let subtitleEvents: Array<{ text: string; start: number; end: number }> = [];
-  let subtitleAssPath = '';
-
-  if (meta?.words?.length) {
-    console.info(`[render:${jobId}] timing_data:using_words=${meta.words.length} source=${meta.timingSource}`);
-    const timingSample = meta.words.slice(0, 5).map((w) => `${w.word}:${w.start.toFixed(2)}-${w.end.toFixed(2)}`).join('|');
-    console.info(`[render:${jobId}] timing_data_sample=${timingSample}`);
-    subtitleEvents = normalizeSubtitleEvents(buildSubtitleEventsFromWords(meta.words));
-    subtitleAssPath = await writeAssSubtitle(jobId, subtitleEvents);
-    console.info(`[render:${jobId}] subtitle_file=${subtitleAssPath} subtitle_events=${subtitleEvents.length}`);
-  } else if (meta?.sentences?.length) {
-    const timingSample = meta.sentences.slice(0, 3).map((s) => `${s.text.slice(0, 20)}:${s.start.toFixed(2)}-${s.end.toFixed(2)}`).join('|');
-    console.info(`[render:${jobId}] timing_data:using_sentences=${meta.sentences.length} source=${meta.timingSource} sample=${timingSample}`);
-    subtitleEvents = normalizeSubtitleEvents(meta.sentences.map((s) => ({ text: s.text, start: s.start, end: s.end })));
-    subtitleAssPath = await writeAssSubtitle(jobId, subtitleEvents);
-    console.info(`[render:${jobId}] subtitle_file=${subtitleAssPath} subtitle_events=${subtitleEvents.length}`);
-  } else {
-    console.warn(`[render:${jobId}] missing timing metadata; rendering without burned subtitles`);
+  if (!meta?.words?.length) {
+    throw new Error(`[render:${jobId}] missing UnrealSpeech timing metadata; cannot render synchronized subtitles`);
   }
 
-  if (subtitleEvents.length) {
-    const timeline = summarizeSubtitleTimeline(subtitleEvents);
-    console.info(`[render:${jobId}] subtitle_timeline first_start=${timeline.firstStart.toFixed(2)} last_end=${timeline.lastEnd.toFixed(2)} event_count=${timeline.count} scene_count=${imagePaths.length}`);
-    if (subtitleEvents.length <= imagePaths.length) {
-      console.warn(`[render:${jobId}] subtitle_event_density_low event_count=${subtitleEvents.length} scene_count=${imagePaths.length} possible_per_scene_bug=true`);
-    }
-  }
-
-  try {
-    const localOutput = await assembleVideoLocally(jobId, audioPath, imagePaths, subtitleAssPath || undefined);
-    console.info(`[render:${jobId}] local_ffmpeg_render=success output=${localOutput}`);
-    return localOutput;
-  } catch (localError: any) {
-    console.warn(`[render:${jobId}] local ffmpeg render failed; falling back to Supabase function`, localError?.message || localError);
-  }
+  const subtitleEvents = buildSubtitleEventsFromWords(meta.words);
+  const subtitleAssPath = await writeAssSubtitle(jobId, subtitleEvents);
+  console.info(`[render:${jobId}] subtitle_file=${subtitleAssPath} subtitle_events=${subtitleEvents.length}`);
 
   const remote = await renderVideoViaSupabaseFunction({
     jobId,
@@ -675,15 +369,15 @@ export async function assembleVideo(jobId: string, audioPath: string, imagePaths
     imagePaths,
     subtitleLines,
     subtitleEvents,
-    subtitleAss: subtitleAssPath ? await fs.readFile(subtitleAssPath, 'utf8') : '',
+    subtitleAss: await fs.readFile(subtitleAssPath, 'utf8'),
     voiceoverMeta: meta,
   });
 
   if (!remote?.localOutput) {
-    throw new Error(`[render:${jobId}] both local and Supabase rendering failed: missing outputPath/localOutput`);
+    throw new Error(`[render:${jobId}] render_provider=supabase_only failed: missing outputPath/localOutput`);
   }
 
-  console.info(`[render:${jobId}] supabase_fallback_render=success subtitles_burned=${String(remote.subtitlesBurned)} output=${remote.outputPath || remote.localOutput} duration_sec=${Number(remote.outputDurationSec || 0).toFixed(2)} status=${remote.renderStatus || 'unknown'} renderer_version=${String((remote as any).rendererVersion || 'unknown')}`);
+  console.info(`[render:${jobId}] subtitles_burn_step=success subtitles_burned=${String(remote.subtitlesBurned)} output=${remote.outputPath || remote.localOutput} duration_sec=${Number(remote.outputDurationSec || 0).toFixed(2)} status=${remote.renderStatus || 'unknown'}`);
   return remote.localOutput;
 }
 
