@@ -34,13 +34,6 @@ type OverlayAssetType = 'post_image' | 'video_scene';
 const UNREAL_VOICES = ['Oliver', 'Noah', 'Ethan', 'Daniel'];
 const voiceMetaByJob = new Map<string, VoiceoverMeta>();
 
-function toSeconds(value: unknown) {
-  const raw = Number(value);
-  if (!Number.isFinite(raw)) return Number.NaN;
-  if (raw >= 1_000) return raw / 1_000;
-  return raw;
-}
-
 function detectTimestampScale(raw: any): 1 | 0.001 {
   if (!Array.isArray(raw) || !raw.length) return 1;
   const numbers: number[] = [];
@@ -58,9 +51,9 @@ function detectTimestampScale(raw: any): 1 | 0.001 {
 }
 
 function scaleTiming(value: unknown, scale: 1 | 0.001) {
-  const seconds = toSeconds(value);
-  if (!Number.isFinite(seconds)) return Number.NaN;
-  return seconds * scale;
+  const raw = Number(value);
+  if (!Number.isFinite(raw)) return Number.NaN;
+  return raw * scale;
 }
 
 
@@ -307,7 +300,8 @@ async function writeAssSubtitle(jobId: string, events: Array<{ text: string; sta
     '',
     '[V4+ Styles]',
     'Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding',
-    'Style: Viral,Arial,76,&H00FFFFFF,&H00FFFFFF,&H00202020,&H00000000,1,0,0,0,100,100,0,0,1,4,0,5,70,70,40,1',
+    // Use bottom-center captions with a solid translucent box to keep subtitles visible on bright footage.
+    'Style: Viral,Arial,68,&H00FFFFFF,&H00FFFFFF,&H00000000,&H88000000,1,0,0,0,100,100,0,0,3,0,0,2,80,80,120,1',
     '',
     '[Events]',
     'Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text',
