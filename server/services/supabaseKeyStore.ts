@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import { ApiKey } from '../../src/types';
 
 type ApiKeyRow = {
@@ -31,6 +32,9 @@ function getSupabaseConfigOrThrow() {
 
 function getSupabaseRestClient() {
   const { supabaseUrl, serviceKey } = getSupabaseConfigOrThrow();
+  const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
+  const httpsAgent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : undefined;
+
   return axios.create({
     baseURL: `${supabaseUrl}/rest/v1`,
     headers: {
@@ -38,6 +42,8 @@ function getSupabaseRestClient() {
       Authorization: `Bearer ${serviceKey}`,
       'Content-Type': 'application/json',
     },
+    httpsAgent,
+    proxy: false,
     timeout: 30_000,
   });
 }

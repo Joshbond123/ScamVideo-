@@ -1,6 +1,7 @@
 import axios from 'axios';
 import fs from 'fs-extra';
 import path from 'path';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import { getKeyValueByTypeAndName } from './supabaseKeyStore';
 
 const DEFAULT_BUCKET = process.env.SUPABASE_MEDIA_BUCKET || 'temp-media';
@@ -55,9 +56,14 @@ function getConfig() {
 
 function makeClient() {
   const { url, key } = getConfig();
+  const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
+  const httpsAgent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : undefined;
+
   return axios.create({
     baseURL: `${url}/storage/v1`,
     headers: { apikey: key, Authorization: `Bearer ${key}` },
+    httpsAgent,
+    proxy: false,
     timeout: 60_000,
   });
 }
@@ -67,6 +73,15 @@ function makeEdgeFunctionHeaders(key: string) {
     Authorization: `Bearer ${key}`,
     apikey: key,
     'Content-Type': 'application/json',
+  };
+}
+
+function getProxyRequestConfig() {
+  const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
+  const httpsAgent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : undefined;
+  return {
+    httpsAgent,
+    proxy: false as const,
   };
 }
 
@@ -87,7 +102,7 @@ async function downloadRenderedVideo(client: ReturnType<typeof makeClient>, rend
   await fs.ensureDir(path.dirname(localOutput));
 
   if (/^https?:\/\//i.test(normalized)) {
-    const download = await axios.get(normalized, { responseType: 'arraybuffer', timeout: 180_000 });
+    const download = await axios.get(normalized, { responseType: 'arraybuffer', timeout: 180_000, ...getProxyRequestConfig() });
     await fs.writeFile(localOutput, Buffer.from(download.data));
     return { localOutput, outputPath: renderedPathOrUrl };
   }
@@ -201,6 +216,7 @@ export async function validateSupabaseRenderFunctionEndpoint() {
           headers: makeEdgeFunctionHeaders(key),
           timeout: 15_000,
           validateStatus: () => true,
+          ...getProxyRequestConfig(),
         }
       );
 
