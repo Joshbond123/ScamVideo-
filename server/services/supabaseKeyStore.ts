@@ -1,5 +1,4 @@
 import axios from 'axios';
-import { HttpsProxyAgent } from 'https-proxy-agent';
 import { ApiKey } from '../../src/types';
 
 type ApiKeyRow = {
@@ -32,9 +31,6 @@ function getSupabaseConfigOrThrow() {
 
 function getSupabaseRestClient() {
   const { supabaseUrl, serviceKey } = getSupabaseConfigOrThrow();
-  const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
-  const httpsAgent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : undefined;
-
   return axios.create({
     baseURL: `${supabaseUrl}/rest/v1`,
     headers: {
@@ -42,32 +38,8 @@ function getSupabaseRestClient() {
       Authorization: `Bearer ${serviceKey}`,
       'Content-Type': 'application/json',
     },
-    httpsAgent,
-    proxy: false,
     timeout: 30_000,
   });
-}
-
-
-function isTransientSupabaseError(error: any) {
-  const status = Number(error?.response?.status || 0);
-  return status === 429 || status >= 500 || !status;
-}
-
-async function withSupabaseRetry<T>(label: string, fn: () => Promise<T>, attempts = 4): Promise<T> {
-  let last: any;
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    try {
-      return await fn();
-    } catch (error: any) {
-      last = error;
-      if (attempt >= attempts || !isTransientSupabaseError(error)) break;
-      const waitMs = 300 * 2 ** (attempt - 1);
-      console.warn(`[supabaseKeyStore:${label}] transient error; retrying attempt=${attempt + 1}/${attempts} waitMs=${waitMs}`);
-      await new Promise((resolve) => setTimeout(resolve, waitMs));
-    }
-  }
-  throw last;
 }
 
 function rowToApiKey(row: ApiKeyRow): ApiKey {
@@ -86,14 +58,14 @@ function rowToApiKey(row: ApiKeyRow): ApiKey {
 
 async function getRow(provider: ApiKey['provider'], id: string): Promise<ApiKeyRow | null> {
   const client = getSupabaseRestClient();
-  const response = await withSupabaseRetry('get_row', () => client.get('/api_keys', {
+  const response = await client.get('/api_keys', {
     params: {
       key_type: `eq.${provider}`,
       id: `eq.${id}`,
       select: 'id,key_type,key_name,encrypted_key,metadata,created_at,updated_at',
       limit: 1,
     },
-  }));
+  });
 
   const rows = Array.isArray(response.data) ? response.data : [];
   return (rows[0] as ApiKeyRow | undefined) || null;
@@ -101,7 +73,7 @@ async function getRow(provider: ApiKey['provider'], id: string): Promise<ApiKeyR
 
 export async function getKeyValueByTypeAndName(keyType: string, keyName: string): Promise<string | null> {
   const client = getSupabaseRestClient();
-  const response = await withSupabaseRetry('get_by_type_name', () => client.get('/api_keys', {
+  const response = await client.get('/api_keys', {
     params: {
       key_type: `eq.${keyType}`,
       key_name: `eq.${keyName}`,
@@ -109,7 +81,7 @@ export async function getKeyValueByTypeAndName(keyType: string, keyName: string)
       order: 'updated_at.desc',
       limit: 1,
     },
-  }));
+  });
 
   const rows = Array.isArray(response.data) ? response.data : [];
   const row = (rows[0] as GenericKeyRow | undefined) || null;
@@ -118,13 +90,13 @@ export async function getKeyValueByTypeAndName(keyType: string, keyName: string)
 
 export async function listApiKeys(provider: ApiKey['provider']): Promise<ApiKey[]> {
   const client = getSupabaseRestClient();
-  const response = await withSupabaseRetry('list_keys', () => client.get('/api_keys', {
+  const response = await client.get('/api_keys', {
     params: {
       key_type: `eq.${provider}`,
       select: 'id,key_type,key_name,encrypted_key,metadata,created_at,updated_at',
       order: 'created_at.desc',
     },
-  }));
+  });
 
   const rows = Array.isArray(response.data) ? response.data : [];
   return rows.map((r: ApiKeyRow) => rowToApiKey(r));
@@ -139,7 +111,7 @@ export async function insertApiKey(key: ApiKey): Promise<ApiKey> {
     lastUsed: key.lastUsed ?? null,
   };
 
-  const response = await withSupabaseRetry('insert_key', () => client.post(
+  const response = await client.post(
     '/api_keys',
     [
       {
@@ -155,7 +127,7 @@ export async function insertApiKey(key: ApiKey): Promise<ApiKey> {
         Prefer: 'return=representation',
       },
     }
-  ));
+  );
 
   const row = (Array.isArray(response.data) ? response.data[0] : null) as ApiKeyRow | null;
   if (!row) throw new Error(`Failed to insert ${key.provider} key in Supabase`);
@@ -182,7 +154,7 @@ export async function patchApiKey(provider: ApiKey['provider'], id: string, valu
   if (values.key !== undefined) payload.encrypted_key = values.key;
 
   const client = getSupabaseRestClient();
-  const response = await withSupabaseRetry('patch_key', () => client.patch('/api_keys', payload, {
+  const response = await client.patch('/api_keys', payload, {
     params: {
       key_type: `eq.${provider}`,
       id: `eq.${id}`,
@@ -191,7 +163,7 @@ export async function patchApiKey(provider: ApiKey['provider'], id: string, valu
     headers: {
       Prefer: 'return=representation',
     },
-  }));
+  });
 
   const row = (Array.isArray(response.data) ? response.data[0] : null) as ApiKeyRow | null;
   return row ? rowToApiKey(row) : null;
@@ -199,12 +171,10 @@ export async function patchApiKey(provider: ApiKey['provider'], id: string, valu
 
 export async function deleteApiKey(provider: ApiKey['provider'], id: string): Promise<void> {
   const client = getSupabaseRestClient();
-  await withSupabaseRetry('delete_key', () =>
-    client.delete('/api_keys', {
-      params: {
-        key_type: `eq.${provider}`,
-        id: `eq.${id}`,
-      },
-    })
-  );
+  await client.delete('/api_keys', {
+    params: {
+      key_type: `eq.${provider}`,
+      id: `eq.${id}`,
+    },
+  });
 }
