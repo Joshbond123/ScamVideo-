@@ -1,43 +1,31 @@
 # Merge Attempt Report
 
-Date: 2026-03-04
+Date: 2026-03-05
 
 ## Objective
-Diagnose and fix GitHub API connectivity, then use the provided PAT to merge the pending pull request and report PR/conflict status.
+Use the provided PAT to fix merge conflicts and merge open pull requests for `Joshbond123/ScamVideo-`.
 
-## Network investigation findings
-- This environment is in a restricted network where direct outbound access to `api.github.com:443` is blocked.
-- A configured HTTP(S) proxy is required for external API access:
-  - `HTTP_PROXY=http://proxy:8080`
-  - `HTTPS_PROXY=http://proxy:8080`
-- Direct (no-proxy) request fails with unreachable egress:
-  - `curl --noproxy '*' ... api.github.com ...`
-  - `curl: (7) Failed to connect to api.github.com port 443 ... Couldn't connect to server`
-- Proxy path works and successfully reaches GitHub API (HTTP 200).
+## Open pull requests before work
+- PR #36 (`codex/resolve-branch-conflicts-and-push-pr-ejifzv` -> `main`)
+- PR #37 (`codex/resolve-branch-conflicts-and-push-pr-k9htac` -> `main`)
 
-## Root cause
-The issue was not a bad token; it was networking policy:
-1. Direct internet egress is blocked from the runtime.
-2. Requests must go through the platform proxy.
+## Conflict resolution performed
+For both PR branches, `origin/main` was merged into each head branch locally and conflicts were resolved in:
+- `.env.example`
+- `.github/workflows/gstreamer-render.yml`
+- `server/db.ts`
+- `server/scheduler.ts`
+- `server/services/supabaseKeyStore.ts`
+- `server/services/supabaseStorage.ts`
+- `server/services/videoService.ts`
 
-## Fix applied
-- Used the environment proxy configuration (default curl behavior with `HTTP_PROXY/HTTPS_PROXY` set).
-- Avoided `--noproxy '*'` for GitHub API calls.
-- Verified GitHub API access succeeds with the provided PAT.
+Then both updated branches were pushed back to GitHub.
 
-## Pull request handling
-- Open PRs before merge: **1** (PR #29).
-- PR #29 was initially `mergeable_state: dirty` (conflicts).
-- Fetched base/head refs, resolved merge conflicts locally, and pushed the resolved head branch.
-- Merged PR #29 via GitHub API merge endpoint.
-- Open PRs after merge: **0**.
+## Merge results
+- PR #36 merged successfully. Merge commit SHA: `adebc2a34b040a925950cdcee509cf99524ccea7`
+- PR #37 merged successfully. Merge commit SHA: `9d28a265ebf23540c112da7da86640d72ae6584e`
 
-## Conflict status
-- Conflicts encountered while resolving PR #29 locally: **8 files**.
-- Conflicts fixed: **8 files**.
-- Local conflict markers remaining in repository after resolution checks: **0**.
-
-## Merge result
-- PR #29 merged successfully.
-- Merge commit SHA: `b437c8ed29693bf41b3a6d607524151601f6781d`.
-
+## Final counts
+- Pull requests merged: **2**
+- Conflict-resolution commits pushed to PR branches: **2**
+- Open pull requests remaining: **0**
