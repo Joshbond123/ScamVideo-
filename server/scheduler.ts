@@ -16,6 +16,7 @@ import {
 } from './services/videoService';
 import { postCommentToFacebook, postPhotoToFacebook, postVideoToFacebook, verifyFacebookObjectPublished } from './services/facebookService';
 import { getActiveKeys, resolveCloudflareAccountId } from './services/keyService';
+import { validateSupabaseRenderFunctionEndpoint } from './services/supabaseStorage';
 
 const SCHEDULER_TICK_MS = 15_000;
 const STALE_GENERATING_MS = 15 * 60 * 1000;
@@ -34,7 +35,7 @@ const STAGE_TIMEOUTS_MS: Record<string, number> = {
   video_scene_image_generation: 8 * 60_000,
   post_image_generation_with_overlay: 4 * 60_000,
   video_voiceover_generation: 4 * 60_000,
-  video_render_gstreamer: 20 * 60_000,
+  video_render_ffmpeg: 12 * 60_000,
   video_host_catbox: 3 * 60_000,
   post_host_catbox: 3 * 60_000,
   video_publish_facebook: 3 * 60_000,
@@ -44,6 +45,11 @@ const STAGE_TIMEOUTS_MS: Record<string, number> = {
 
 let schedulerTimer: NodeJS.Timeout | null = null;
 let isTickRunning = false;
+const inFlightJobs = new Set<string>();
+
+function getJobKey(schedule: Pick<Schedule, 'id' | 'type'>) {
+  return `${schedule.type}:${schedule.id}`;
+}
 
 function getScheduleSortTime(schedule: Schedule) {
   const primary = schedule.createdAt || schedule.scheduledAt;
@@ -159,8 +165,11 @@ async function validateRequiredConfig(schedule: Schedule) {
   if (!cloudflareAccountId) missing.push('cloudflare_account_id');
 
   if (schedule.type === 'video') {
-    if (!(process.env.GITHUB_PAT || process.env.RENDER_GITHUB_PAT)) missing.push('github_pat');
-    if (!(process.env.GITHUB_RENDER_REPO || process.env.RENDER_REPO)) missing.push('github_render_repo');
+    try {
+      await validateSupabaseRenderFunctionEndpoint();
+    } catch (error: any) {
+      missing.push(`supabase_render_function:${error?.message || error}`);
+    }
   }
 
   if (missing.length) throw new Error(`Missing required configuration: ${missing.join(', ')}`);
@@ -178,18 +187,6 @@ async function updateSchedule(id: string, type: 'video' | 'post', patch: Partial
 
 async function setScheduleStatus(id: string, type: 'video' | 'post', status: Schedule['status'], patch: Partial<Schedule> = {}) {
   await updateSchedule(id, type, { ...patch, status });
-}
-
-
-async function setScheduleStatusWithVerification(id: string, type: 'video' | 'post', status: Schedule['status'], patch: Partial<Schedule> = {}) {
-  await setScheduleStatus(id, type, status, patch);
-  const path = type === 'video' ? PATHS.schedules.video : PATHS.schedules.post;
-  for (let i = 0; i < 3; i++) {
-    const rows = await readJson<Schedule[]>(path);
-    const row = (Array.isArray(rows) ? rows : []).find((r) => r.id === id);
-    if (row?.status === status) return;
-    await setScheduleStatus(id, type, status, patch);
-  }
 }
 
 async function claimScheduleForRun(id: string, type: 'video' | 'post'): Promise<boolean> {
@@ -254,8 +251,8 @@ async function processDueSchedules() {
   try {
     await Promise.all([failStaleGeneratingSchedules('video'), failStaleGeneratingSchedules('post')]);
 
-    const videoSchedules = await readJson<Schedule[]>(PATHS.schedules.video);
-    const postSchedules = await readJson<Schedule[]>(PATHS.schedules.post);
+    const videoSchedules = (await readJson<Schedule[]>(PATHS.schedules.video)).map((s) => ({ ...s, type: 'video' as const }));
+    const postSchedules = (await readJson<Schedule[]>(PATHS.schedules.post)).map((s) => ({ ...s, type: 'post' as const }));
     const pending = [...videoSchedules, ...postSchedules]
       .filter((s) => s.status === 'pending')
       .sort((a, b) => getScheduleSortTime(a) - getScheduleSortTime(b));
@@ -276,7 +273,18 @@ async function processDueSchedules() {
     }
 
     for (const schedule of due) {
-      await runJob(schedule);
+      const jobKey = getJobKey(schedule);
+      if (inFlightJobs.has(jobKey)) continue;
+
+      inFlightJobs.add(jobKey);
+      runJob(schedule)
+        .catch((error) => {
+          console.error(`Background job execution failed for ${jobKey}:`, error);
+        })
+        .finally(() => {
+          inFlightJobs.delete(jobKey);
+          requestSchedulerRefresh();
+        });
     }
   } finally {
     isTickRunning = false;
@@ -285,12 +293,17 @@ async function processDueSchedules() {
 
 async function computeNextWakeDelayMs(): Promise<number | null> {
   const [videoSchedules, postSchedules] = await Promise.all([
-    readJson<Schedule[]>(PATHS.schedules.video),
-    readJson<Schedule[]>(PATHS.schedules.post),
+    readJson<Schedule[]>(PATHS.schedules.video).then((rows) => rows.map((s) => ({ ...s, type: 'video' as const }))),
+    readJson<Schedule[]>(PATHS.schedules.post).then((rows) => rows.map((s) => ({ ...s, type: 'post' as const }))),
   ]);
 
-  const pending = [...videoSchedules, ...postSchedules].filter((s) => s.status === 'pending');
-  if (!pending.length) return null;
+  const allSchedules = [...videoSchedules, ...postSchedules];
+  const pending = allSchedules.filter((s) => s.status === 'pending');
+  const generating = allSchedules.filter((s) => s.status === 'generating');
+
+  if (!pending.length) {
+    return generating.length || inFlightJobs.size ? SCHEDULER_TICK_MS : null;
+  }
 
   const now = Date.now();
   const nextTs = Math.min(...pending.map((s) => new Date(s.scheduledAt).getTime()));
@@ -383,8 +396,7 @@ export async function runJob(schedule: Schedule) {
       else await runPostPipeline(schedule, selectedTopic);
     }, JOB_MAX_RUNTIME_MS, `job:${schedule.id}`);
 
-    clearInterval(heartbeatTimer);
-    await setScheduleStatusWithVerification(schedule.id, schedule.type, 'posted', {
+    await setScheduleStatus(schedule.id, schedule.type, 'posted', {
       publishedAt: new Date().toISOString(),
       failedAt: undefined,
       errorMessage: '',
@@ -392,7 +404,6 @@ export async function runJob(schedule: Schedule) {
       lastHeartbeatAt: new Date().toISOString(),
     });
     await logEvent(schedule.type, 'success', `job_success id=${schedule.id}`, schedule.niche);
-    await logEvent(schedule.type, 'info', `job_terminal_state id=${schedule.id} state=posted publishedAt=${new Date().toISOString()}`, schedule.niche);
 
     if (schedule.isDaily) {
       const nextDate = new Date(schedule.scheduledAt);
@@ -412,9 +423,8 @@ export async function runJob(schedule: Schedule) {
       await logEvent(schedule.type, 'info', `daily_rescheduled original=${schedule.id} next=${newSchedule.id} at=${newSchedule.scheduledAt}`, schedule.niche);
     }
   } catch (error: any) {
-    clearInterval(heartbeatTimer);
     const e = normalizeError(error);
-    await setScheduleStatusWithVerification(schedule.id, schedule.type, 'failed', {
+    await setScheduleStatus(schedule.id, schedule.type, 'failed', {
       failedAt: new Date().toISOString(),
       errorMessage: e.message,
       currentStage: 'failed',
@@ -426,8 +436,8 @@ export async function runJob(schedule: Schedule) {
       `job_failed id=${schedule.id} message=${e.message}${e.status ? ` status=${e.status}` : ''}${e.response ? ` response=${JSON.stringify(e.response)}` : ''}`,
       schedule.niche
     );
-    await logEvent(schedule.type, 'info', `job_terminal_state id=${schedule.id} state=failed failedAt=${new Date().toISOString()}`, schedule.niche);
   } finally {
+    clearInterval(heartbeatTimer);
   }
 }
 
@@ -459,7 +469,7 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
       }
     });
 
-    const videoPath = await withStage(schedule, 'video_render_gstreamer', async () =>
+    const videoPath = await withStage(schedule, 'video_render_ffmpeg', async () =>
       assembleVideo(
         jobId,
         audioPath,

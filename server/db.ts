@@ -2,6 +2,7 @@ import fs from 'fs-extra';
 import path from 'path';
 import axios from 'axios';
 import crypto from 'crypto';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 
 const DB_ROOT = path.join(process.cwd(), 'database');
 
@@ -41,6 +42,9 @@ function getSupabaseConfigOrThrow() {
 
 function getSupabaseRestClient() {
   const { url, key } = getSupabaseConfigOrThrow();
+  const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
+  const httpsAgent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : undefined;
+
   return axios.create({
     baseURL: `${url}/rest/v1`,
     headers: {
@@ -48,8 +52,32 @@ function getSupabaseRestClient() {
       Authorization: `Bearer ${key}`,
       'Content-Type': 'application/json',
     },
+    httpsAgent,
+    proxy: false,
     timeout: 30_000,
   });
+}
+
+
+function isTransientSupabaseError(error: any) {
+  const status = Number(error?.response?.status || 0);
+  return status === 429 || status >= 500 || !status;
+}
+
+async function withSupabaseRetry<T>(label: string, fn: () => Promise<T>, attempts = 4): Promise<T> {
+  let last: any;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await fn();
+    } catch (error: any) {
+      last = error;
+      if (attempt >= attempts || !isTransientSupabaseError(error)) break;
+      const waitMs = 300 * 2 ** (attempt - 1);
+      console.warn(`[db:${label}] transient error; retrying attempt=${attempt + 1}/${attempts} waitMs=${waitMs}`);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+  }
+  throw last;
 }
 
 function resolveStateKey(filePath: string): string | null {
@@ -74,7 +102,7 @@ type StateRow = {
 
 async function getStateRow(stateKey: string): Promise<StateRow | null> {
   const client = getSupabaseRestClient();
-  const response = await client.get('/api_keys', {
+  const response = await withSupabaseRetry('get_state_row', () => client.get('/api_keys', {
     params: {
       key_type: 'eq.state',
       key_name: `eq.${stateKey}`,
@@ -82,7 +110,7 @@ async function getStateRow(stateKey: string): Promise<StateRow | null> {
       order: 'updated_at.desc',
       limit: 1,
     },
-  });
+  }));
 
   const rows = Array.isArray(response.data) ? response.data : [];
   return (rows[0] as StateRow | undefined) || null;
@@ -105,28 +133,32 @@ async function writeToSupabaseState<T>(stateKey: string, data: T): Promise<void>
   const existing = await getStateRow(stateKey);
 
   if (existing) {
-    await client.patch(
-      '/api_keys',
-      { encrypted_key: payload, updated_at: new Date().toISOString() },
-      {
-        params: {
-          key_type: 'eq.state',
-          key_name: `eq.${stateKey}`,
-        },
-      }
+    await withSupabaseRetry('patch_state_row', () =>
+      client.patch(
+        '/api_keys',
+        { encrypted_key: payload, updated_at: new Date().toISOString() },
+        {
+          params: {
+            key_type: 'eq.state',
+            key_name: `eq.${stateKey}`,
+          },
+        }
+      )
     );
     return;
   }
 
-  await client.post('/api_keys', [
-    {
-      id: crypto.randomUUID(),
-      key_type: 'state',
-      key_name: stateKey,
-      encrypted_key: payload,
-      metadata: {},
-    },
-  ]);
+  await withSupabaseRetry('insert_state_row', () =>
+    client.post('/api_keys', [
+      {
+        id: crypto.randomUUID(),
+        key_type: 'state',
+        key_name: stateKey,
+        encrypted_key: payload,
+        metadata: {},
+      },
+    ])
+  );
 }
 
 // Initialize folders only for generated runtime assets/locks.
