@@ -1,7 +1,7 @@
 name: gstreamer-render
 run-name: Render ${{ github.event.inputs.job_id || github.event.client_payload.job_id }}
 
-on:
+'on':
   workflow_dispatch:
     inputs:
       job_id: { required: true, type: string }
