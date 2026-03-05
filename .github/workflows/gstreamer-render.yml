@@ -1,0 +1,115 @@
+name: gstreamer-render
+run-name: Render ${{ inputs.job_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        required: true
+        type: string
+      supabase_url:
+        required: true
+        type: string
+      supabase_service_role_key:
+        required: true
+        type: string
+      bucket:
+        required: true
+        type: string
+      audio_path:
+        required: true
+        type: string
+      image_paths_json:
+        required: true
+        type: string
+      subtitle_events_json:
+        required: true
+        type: string
+      output_path:
+        required: true
+        type: string
+      voice_duration_sec:
+        required: true
+        type: string
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav jq python3
+
+      - name: Download assets + build SRT
+        env:
+          SUPABASE_URL: ${{ inputs.supabase_url }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ inputs.supabase_service_role_key }}
+          BUCKET: ${{ inputs.bucket }}
+          AUDIO_PATH: ${{ inputs.audio_path }}
+          IMAGE_PATHS_JSON: ${{ inputs.image_paths_json }}
+          SUBTITLE_EVENTS_JSON: ${{ inputs.subtitle_events_json }}
+          VOICE_DURATION_SEC: ${{ inputs.voice_duration_sec }}
+        run: |
+          python3 - <<'PY'
+import os, json, math, urllib.request
+
+base = os.environ['SUPABASE_URL'].rstrip('/')
+key = os.environ['SUPABASE_SERVICE_ROLE_KEY']
+bucket = os.environ['BUCKET']
+audio_path = os.environ['AUDIO_PATH']
+image_paths = json.loads(os.environ['IMAGE_PATHS_JSON'])
+subtitle_events = json.loads(os.environ['SUBTITLE_EVENTS_JSON'])
+
+def dl(remote, local):
+    req = urllib.request.Request(f"{base}/storage/v1/object/{bucket}/{remote}", headers={"apikey": key, "Authorization": f"Bearer {key}"})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        data = r.read()
+    with open(local, 'wb') as f:
+        f.write(data)
+
+dl(audio_path, 'audio.mp3')
+for idx, p in enumerate(image_paths):
+    dl(p, f'scene_{idx}.png')
+
+with open('subtitles.srt', 'w', encoding='utf-8') as f:
+    for i, ev in enumerate(subtitle_events, 1):
+        def ts(v):
+            v=max(0.0, float(v))
+            h=int(v//3600); m=int((v%3600)//60); s=int(v%60); ms=int((v-int(v))*1000)
+            return f"{h:02}:{m:02}:{s:02},{ms:03}"
+        txt = str(ev.get('text','')).strip()
+        if not txt: continue
+        f.write(f"{i}\n{ts(ev.get('start',0))} --> {ts(ev.get('end',0))}\n{txt}\n\n")
+
+n = max(1, len(image_paths))
+d = max(1.0, float(os.environ.get('VOICE_DURATION_SEC') or 1.0))
+fps = max(0.01, n / d)
+num = max(1, int(round(fps * 1000)))
+den = 1000
+with open('render.env','w',encoding='utf-8') as f:
+    f.write(f"SCENE_FPS_NUM={num}\nSCENE_FPS_DEN={den}\n")
+PY
+
+      - name: Render MP4 with GStreamer
+        run: |
+          source render.env
+          gst-launch-1.0 -e \
+            multifilesrc location="scene_%d.png" index=0 caps="image/png,framerate=${SCENE_FPS_NUM}/${SCENE_FPS_DEN}" ! pngdec ! imagefreeze ! videoconvert ! videoscale ! video/x-raw,width=1080,height=1920,framerate=30/1 ! subtitleoverlay name=sub ! x264enc speed-preset=veryfast tune=zerolatency bitrate=3500 key-int-max=60 ! h264parse ! queue ! mux. \
+            filesrc location="audio.mp3" ! decodebin ! audioconvert ! audioresample ! voaacenc bitrate=192000 ! queue ! mux. \
+            filesrc location="subtitles.srt" ! subparse ! sub. \
+            mp4mux name=mux ! filesink location="render.mp4"
+
+      - name: Upload rendered video to Supabase storage
+        env:
+          SUPABASE_URL: ${{ inputs.supabase_url }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ inputs.supabase_service_role_key }}
+          BUCKET: ${{ inputs.bucket }}
+          OUTPUT_PATH: ${{ inputs.output_path }}
+        run: |
+          curl -sS -X POST "${SUPABASE_URL}/storage/v1/object/${BUCKET}/${OUTPUT_PATH}" \
+            -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+            -H "x-upsert: true" \
+            -H "Content-Type: video/mp4" \
+            --data-binary @render.mp4
