@@ -4,45 +4,17 @@ run-name: Render ${{ github.event.inputs.job_id || github.event.client_payload.j
 on:
   workflow_dispatch:
     inputs:
-      job_id:
-        description: Render job id
-        required: true
-        type: string
-      supabase_url:
-        description: Supabase project URL
-        required: true
-        type: string
-      supabase_service_role_key:
-        description: Supabase service role key
-        required: true
-        type: string
-      bucket:
-        description: Supabase storage bucket
-        required: true
-        type: string
-      audio_path:
-        description: Audio object path
-        required: true
-        type: string
-      image_paths_json:
-        description: JSON array of image object paths
-        required: true
-        type: string
-      subtitle_events_json:
-        description: JSON subtitle events
-        required: true
-        type: string
-      output_path:
-        description: Output object path
-        required: true
-        type: string
-      voice_duration_sec:
-        description: Voice duration in seconds
-        required: true
-        type: string
+      job_id: { required: true, type: string }
+      supabase_url: { required: true, type: string }
+      supabase_service_role_key: { required: true, type: string }
+      bucket: { required: true, type: string }
+      audio_path: { required: true, type: string }
+      image_paths_json: { required: true, type: string }
+      subtitle_events_json: { required: true, type: string }
+      output_path: { required: true, type: string }
+      voice_duration_sec: { required: true, type: string }
   repository_dispatch:
-    types:
-      - render_video
+    types: [render_video]
 
 jobs:
   render:
