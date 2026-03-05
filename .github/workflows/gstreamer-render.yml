@@ -1,23 +1,38 @@
 name: gstreamer-render
-run-name: Render ${{ inputs.job_id }}
+run-name: Render ${{ github.event.inputs.job_id || github.event.client_payload.job_id }}
 
 on:
   workflow_dispatch:
     inputs:
       job_id:
         required: true
+        type: string
+      supabase_url:
+        required: true
+        type: string
+      supabase_service_role_key:
+        required: true
+        type: string
       bucket:
         required: true
+        type: string
       audio_path:
         required: true
+        type: string
       image_paths_json:
         required: true
+        type: string
       subtitle_events_json:
         required: true
+        type: string
       output_path:
         required: true
+        type: string
       voice_duration_sec:
         required: true
+        type: string
+  repository_dispatch:
+    types: [render_video]
 
 jobs:
   render:
@@ -30,13 +45,13 @@ jobs:
 
       - name: Download assets + build SRT
         env:
-          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          BUCKET: ${{ inputs.bucket }}
-          AUDIO_PATH: ${{ inputs.audio_path }}
-          IMAGE_PATHS_JSON: ${{ inputs.image_paths_json }}
-          SUBTITLE_EVENTS_JSON: ${{ inputs.subtitle_events_json }}
-          VOICE_DURATION_SEC: ${{ inputs.voice_duration_sec }}
+          SUPABASE_URL: ${{ github.event.inputs.supabase_url || github.event.client_payload.supabase_url }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ github.event.inputs.supabase_service_role_key || github.event.client_payload.supabase_service_role_key }}
+          BUCKET: ${{ github.event.inputs.bucket || github.event.client_payload.bucket }}
+          AUDIO_PATH: ${{ github.event.inputs.audio_path || github.event.client_payload.audio_path }}
+          IMAGE_PATHS_JSON: ${{ github.event.inputs.image_paths_json || github.event.client_payload.image_paths_json }}
+          SUBTITLE_EVENTS_JSON: ${{ github.event.inputs.subtitle_events_json || github.event.client_payload.subtitle_events_json }}
+          VOICE_DURATION_SEC: ${{ github.event.inputs.voice_duration_sec || github.event.client_payload.voice_duration_sec }}
         run: |
           python3 - <<'PY'
 import os, json, math, urllib.request
@@ -74,13 +89,16 @@ d = max(1.0, float(os.environ.get('VOICE_DURATION_SEC') or 1.0))
 fps = max(0.01, n / d)
 num = max(1, int(round(fps * 1000)))
 den = 1000
-with open('render.env','w',encoding='utf-8') as f:
-    f.write(f"SCENE_FPS_NUM={num}\nSCENE_FPS_DEN={den}\n")
+with open('fps_num.txt','w',encoding='utf-8') as f:
+    f.write(str(num))
+with open('fps_den.txt','w',encoding='utf-8') as f:
+    f.write(str(den))
 PY
 
       - name: Render MP4 with GStreamer
         run: |
-          source render.env
+          SCENE_FPS_NUM=$(cat fps_num.txt)
+          SCENE_FPS_DEN=$(cat fps_den.txt)
           gst-launch-1.0 -e \
             multifilesrc location="scene_%d.png" index=0 caps="image/png,framerate=${SCENE_FPS_NUM}/${SCENE_FPS_DEN}" ! pngdec ! imagefreeze ! videoconvert ! videoscale ! video/x-raw,width=1080,height=1920,framerate=30/1 ! subtitleoverlay name=sub ! x264enc speed-preset=veryfast tune=zerolatency bitrate=3500 key-int-max=60 ! h264parse ! queue ! mux. \
             filesrc location="audio.mp3" ! decodebin ! audioconvert ! audioresample ! voaacenc bitrate=192000 ! queue ! mux. \
@@ -89,10 +107,10 @@ PY
 
       - name: Upload rendered video to Supabase storage
         env:
-          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          BUCKET: ${{ inputs.bucket }}
-          OUTPUT_PATH: ${{ inputs.output_path }}
+          SUPABASE_URL: ${{ github.event.inputs.supabase_url || github.event.client_payload.supabase_url }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ github.event.inputs.supabase_service_role_key || github.event.client_payload.supabase_service_role_key }}
+          BUCKET: ${{ github.event.inputs.bucket || github.event.client_payload.bucket }}
+          OUTPUT_PATH: ${{ github.event.inputs.output_path || github.event.client_payload.output_path }}
         run: |
           curl -sS -X POST "${SUPABASE_URL}/storage/v1/object/${BUCKET}/${OUTPUT_PATH}" \
             -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
