@@ -14,9 +14,9 @@ import {
   generateFacebookComment,
   rewriteTopicForVideo,
 } from './services/videoService';
-import { postCommentToFacebook, postPhotoToFacebook, postVideoToFacebook, verifyFacebookObjectPublished } from './services/facebookService';
+import { postCommentToFacebook, postPhotoToFacebook, postVideoToFacebook, verifyFacebookObjectPublished, verifyFacebookVideoPublished } from './services/facebookService';
 import { getActiveKeys, resolveCloudflareAccountId } from './services/keyService';
-import { validateSupabaseRenderFunctionEndpoint } from './services/supabaseStorage';
+import { validateGitHubRenderWorkflow } from './services/githubRenderService';
 
 const SCHEDULER_TICK_MS = 15_000;
 const STALE_GENERATING_MS = 15 * 60 * 1000;
@@ -35,10 +35,10 @@ const STAGE_TIMEOUTS_MS: Record<string, number> = {
   video_scene_image_generation: 8 * 60_000,
   post_image_generation_with_overlay: 4 * 60_000,
   video_voiceover_generation: 4 * 60_000,
-  video_render_ffmpeg: 12 * 60_000,
+  video_render_gstreamer: 12 * 60_000,
   video_host_catbox: 3 * 60_000,
   post_host_catbox: 3 * 60_000,
-  video_publish_facebook: 3 * 60_000,
+  video_publish_facebook: 5 * 60_000,
   post_publish_facebook: 2 * 60_000,
   video_cleanup_assets: 2 * 60_000,
 };
@@ -166,9 +166,9 @@ async function validateRequiredConfig(schedule: Schedule) {
 
   if (schedule.type === 'video') {
     try {
-      await validateSupabaseRenderFunctionEndpoint();
+      await validateGitHubRenderWorkflow();
     } catch (error: any) {
-      missing.push(`supabase_render_function:${error?.message || error}`);
+      missing.push(`github_render_workflow:${error?.message || error}`);
     }
   }
 
@@ -469,7 +469,7 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
       }
     });
 
-    const videoPath = await withStage(schedule, 'video_render_ffmpeg', async () =>
+    const videoPath = await withStage(schedule, 'video_render_gstreamer', async () =>
       assembleVideo(
         jobId,
         audioPath,
@@ -483,17 +483,23 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
     await withStage(schedule, 'video_publish_facebook', async () => {
       const description = `${scriptData.caption}\n\n${scriptData.hashtags}`;
       const fbResult = await postVideoToFacebook(schedule.pageId, videoUrl, description);
+      await logEvent(schedule.type, 'info', `facebook_publish_response id=${schedule.id} payload=${JSON.stringify(fbResult || {})}`, schedule.niche);
       const publishTargetId = String((fbResult as any)?.post_id || (fbResult as any)?.id || '');
       if (!publishTargetId) {
         throw new Error(`Facebook upload did not return post id: ${JSON.stringify(fbResult || {})}`);
       }
 
-      const verified = await verifyFacebookObjectPublished(schedule.pageId, publishTargetId);
-      await logEvent(schedule.type, 'info', `facebook_publish_verified id=${schedule.id} object=${verified.id} url=${verified.url}`, schedule.niche);
+      const verified = await verifyFacebookVideoPublished(schedule.pageId, publishTargetId, description);
+      await logEvent(
+        schedule.type,
+        'info',
+        `facebook_publish_verified id=${schedule.id} object=${verified.id} postId=${verified.postId || 'n/a'} status=${verified.status || 'unknown'} published=${String(verified.published ?? 'n/a')} url=${verified.url}`,
+        schedule.niche
+      );
 
       const settings = await readJson<any>(PATHS.settings);
       const comment = await generateFacebookComment(scriptData.title, scriptData.caption, topic, settings?.facebookCommentUrl || '');
-      await postCommentToFacebook(schedule.pageId, verified.id, comment);
+      await postCommentToFacebook(schedule.pageId, [verified.postId || '', verified.id], comment);
 
       await updateJson(PATHS.content.published_videos, (data: any[]) => [
         {

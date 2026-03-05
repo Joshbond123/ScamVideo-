@@ -2,11 +2,10 @@ import path from 'path';
 import fs from 'fs-extra';
 import axios from 'axios';
 import FormData from 'form-data';
-import { spawn } from 'child_process';
-import ffmpegStatic from 'ffmpeg-static';
 import { resolveCloudflareAccountId, withKeyFailover } from './keyService';
 import { readJson, PATHS } from '../db';
-import { deleteSupabaseAssets, pruneSupabaseTempAssets, renderVideoViaSupabaseFunction } from './supabaseStorage';
+import { deleteSupabaseAssets, pruneSupabaseTempAssets } from './supabaseStorage';
+import { renderVideoViaGitHubActions } from './githubRenderService';
 
 type GeneratedScript = {
   title: string;
@@ -503,145 +502,8 @@ export async function generateImage(prompt: string, jobId: string, sceneIdx: num
 }
 
 
-async function renderVideoLocallyWithFfmpeg(args: string[]) {
-  if (!ffmpegStatic) throw new Error('ffmpeg-static binary is unavailable for this platform');
-
-  return await new Promise<string>((resolve, reject) => {
-    const proc = spawn(ffmpegStatic, args, { stdio: ['ignore', 'ignore', 'pipe'] });
-    let stderr = '';
-
-    proc.stderr.on('data', (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    proc.on('error', (error) => reject(error));
-    proc.on('close', (code) => {
-      if (code === 0) return resolve(stderr);
-      reject(new Error(`ffmpeg exited with code ${code}: ${stderr.slice(-4000)}`));
-    });
-  });
-}
-
-
-async function detectLocalLibassSupport() {
-  if (!ffmpegStatic) return false;
-  return await new Promise<boolean>((resolve) => {
-    const proc = spawn(ffmpegStatic, ['-hide_banner', '-filters'], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let output = '';
-
-    proc.stdout.on('data', (chunk) => {
-      output += chunk.toString();
-    });
-
-    proc.stderr.on('data', (chunk) => {
-      output += chunk.toString();
-    });
-
-    proc.on('close', (code) => {
-      resolve(code === 0 && /\bass\b/.test(output) && /\bsubtitles\b/.test(output));
-    });
-    proc.on('error', () => resolve(false));
-  });
-}
-
-async function assembleVideoLocally(jobId: string, audioPath: string, imagePaths: string[], subtitleAssPath?: string) {
-  const outputPath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.mp4`);
-  await fs.ensureDir(path.dirname(outputPath));
-
-  const concatFile = path.join(process.cwd(), 'database/assets/videos', `${jobId}_images.txt`);
-  const durationSec = Math.max(3, Number((voiceMetaByJob.get(jobId)?.durationSec || 0).toFixed(2)) || imagePaths.length * 3);
-  const perImage = Math.max(2.5, durationSec / Math.max(1, imagePaths.length));
-
-  const lines: string[] = [];
-  for (const img of imagePaths) {
-    const safePath = img.replace(/'/g, "'\''");
-    lines.push(`file '${safePath}'`);
-    lines.push(`duration ${perImage.toFixed(3)}`);
-  }
-  if (imagePaths.length) {
-    const last = imagePaths[imagePaths.length - 1].replace(/'/g, "'\''");
-    lines.push(`file '${last}'`);
-  }
-  await fs.writeFile(concatFile, lines.join('\n'), 'utf8');
-
-  const vfParts = ['scale=1080:1920:force_original_aspect_ratio=increase', 'crop=1080:1920', 'format=yuv420p'];
-  if (subtitleAssPath) {
-    const supportsLibass = await detectLocalLibassSupport();
-    console.info(`[render:${jobId}] ffmpeg_libass_support=${supportsLibass}`);
-    if (!supportsLibass) {
-      throw new Error('Local ffmpeg build does not support libass ass/subtitles filters');
-    }
-    const escaped = subtitleAssPath.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/,/g, '\\,');
-    vfParts.push(`ass='${escaped}'`);
-  }
-
-  const ffmpegArgs = [
-    '-y',
-    '-f', 'concat',
-    '-safe', '0',
-    '-i', concatFile,
-    '-i', audioPath,
-    '-vf', vfParts.join(','),
-    '-r', '30',
-    '-c:v', 'libx264',
-    '-preset', 'veryfast',
-    '-pix_fmt', 'yuv420p',
-    '-c:a', 'aac',
-    '-b:a', '192k',
-    '-shortest',
-    outputPath,
-  ];
-
-  if (subtitleAssPath) {
-    const subtitleContent = await fs.readFile(subtitleAssPath, 'utf8');
-    const subtitleStats = await fs.stat(subtitleAssPath);
-    const subtitleLineCount = subtitleContent
-      .split(/\r?\n/)
-      .filter((line) => line.startsWith('Dialogue:'))
-      .length;
-    console.info(`[render:${jobId}] subtitle_file_path=${subtitleAssPath} subtitle_size_bytes=${subtitleStats.size} subtitle_line_count=${subtitleLineCount}`);
-  }
-
-  console.info(`[render:${jobId}] ffmpeg_command=${[String(ffmpegStatic), ...ffmpegArgs].join(' ')}`);
-  const ffmpegStderr = await renderVideoLocallyWithFfmpeg(ffmpegArgs);
-  console.info(`[render:${jobId}] ffmpeg_stderr_tail=${ffmpegStderr.slice(-4000)}`);
-  const ffmpegLibassLines = ffmpegStderr
-    .split(/\r?\n/)
-    .filter((line) => /libass|Parsed_ass|Added subtitle file|fontselect|font provider/i.test(line))
-    .slice(-20);
-  if (ffmpegLibassLines.length) {
-    console.info(`[render:${jobId}] ffmpeg_subtitle_messages=${JSON.stringify(ffmpegLibassLines)}`);
-  }
-
-  if (subtitleAssPath) {
-    console.info(`[render:${jobId}] subtitles_applied=true subtitle_source=${subtitleAssPath} burn_step_ran=true`);
-  } else {
-    console.info(`[render:${jobId}] subtitles_applied=false reason=no_subtitle_file burn_step_ran=true`);
-  }
-
-  await fs.remove(concatFile).catch(() => undefined);
-  return outputPath;
-}
-
-export async function addTitleOverlayToImage(imagePath: string, _title: string, assetType: OverlayAssetType) {
-  if (assetType !== 'post_image') {
-    console.warn(`[overlay] blocked assetType=${assetType} path=${imagePath}`);
-    return imagePath;
-  }
-
-  // Intentionally no-op for now. We keep this hook for post image pipeline only.
-  console.info(`[overlay] post_image overlay hook path=${imagePath}`);
-  return imagePath;
-}
-
-export async function generatePostImageWithTitleOverlay(prompt: string, title: string, jobId: string) {
-  const cleanPrompt = `${prompt}. No text, letters, words, logo, watermark, typography.`;
-  const imagePath = await generateImage(cleanPrompt, jobId, 0);
-  return addTitleOverlayToImage(imagePath, title, 'post_image');
-}
-
 export async function assembleVideo(jobId: string, audioPath: string, imagePaths: string[], subtitleLines: string[]) {
-  console.info(`[render:${jobId}] render_provider=local_ffmpeg_with_supabase_fallback`);
+  console.info(`[render:${jobId}] render_provider=github_actions_gstreamer_only`);
 
   const meta = voiceMetaByJob.get(jobId);
   const durationSec = Math.max(3, Number(meta?.durationSec || 0) || imagePaths.length * 3);
@@ -678,30 +540,41 @@ export async function assembleVideo(jobId: string, audioPath: string, imagePaths
     }
   }
 
-  try {
-    const localOutput = await assembleVideoLocally(jobId, audioPath, imagePaths, subtitleAssPath || undefined);
-    console.info(`[render:${jobId}] local_ffmpeg_render=success output=${localOutput}`);
-    return localOutput;
-  } catch (localError: any) {
-    console.warn(`[render:${jobId}] local ffmpeg render failed; falling back to Supabase function`, localError?.message || localError);
-  }
-
-  const remote = await renderVideoViaSupabaseFunction({
+  const ghRender = await renderVideoViaGitHubActions({
     jobId,
     audioPath,
     imagePaths,
-    subtitleLines,
     subtitleEvents,
-    subtitleAss: subtitleAssPath ? await fs.readFile(subtitleAssPath, 'utf8') : '',
-    voiceoverMeta: meta,
+    voiceoverMeta: {
+      voiceId: meta?.voiceId || 'unknown',
+      timingSource: meta?.timingSource || 'unknown',
+      durationSec,
+    },
   });
 
-  if (!remote?.localOutput) {
-    throw new Error(`[render:${jobId}] both local and Supabase rendering failed: missing outputPath/localOutput`);
+  if (!ghRender?.localOutput) {
+    throw new Error(`[render:${jobId}] github actions renderer did not return local output path`);
   }
 
-  console.info(`[render:${jobId}] supabase_fallback_render=success subtitles_burned=${String(remote.subtitlesBurned)} output=${remote.outputPath || remote.localOutput} duration_sec=${Number(remote.outputDurationSec || 0).toFixed(2)} status=${remote.renderStatus || 'unknown'} renderer_version=${String((remote as any).rendererVersion || 'unknown')}`);
-  return remote.localOutput;
+  console.info(`[render:${jobId}] github_actions_render=success output=${ghRender.outputPath || ghRender.localOutput} runUrl=${ghRender.runUrl || 'n/a'}`);
+  return ghRender.localOutput;
+}
+
+export async function addTitleOverlayToImage(imagePath: string, _title: string, assetType: OverlayAssetType) {
+  if (assetType !== 'post_image') {
+    console.warn(`[overlay] blocked assetType=${assetType} path=${imagePath}`);
+    return imagePath;
+  }
+
+  // Intentionally no-op for now. We keep this hook for post image pipeline only.
+  console.info(`[overlay] post_image overlay hook path=${imagePath}`);
+  return imagePath;
+}
+
+export async function generatePostImageWithTitleOverlay(prompt: string, title: string, jobId: string) {
+  const cleanPrompt = `${prompt}. No text, letters, words, logo, watermark, typography.`;
+  const imagePath = await generateImage(cleanPrompt, jobId, 0);
+  return addTitleOverlayToImage(imagePath, title, 'post_image');
 }
 
 export async function uploadToCatbox(filePath: string) {

@@ -1,44 +1,8 @@
 import axios from 'axios';
 import fs from 'fs-extra';
-import path from 'path';
 import { HttpsProxyAgent } from 'https-proxy-agent';
-import { getKeyValueByTypeAndName } from './supabaseKeyStore';
 
 const DEFAULT_BUCKET = process.env.SUPABASE_MEDIA_BUCKET || 'temp-media';
-
-const EMERGENCY_VIDEO_URL = process.env.EMERGENCY_VIDEO_URL || 'https://samplelib.com/lib/preview/mp4/sample-10s.mp4';
-const ALLOW_RENDER_EMERGENCY_FALLBACK = (process.env.ALLOW_RENDER_EMERGENCY_FALLBACK || 'true').toLowerCase() !== 'false';
-
-async function resolveRenderFunctionUrls() {
-  const envConfigured = process.env.SUPABASE_RENDER_FUNCTION_URL;
-  const dbConfigured = await getKeyValueByTypeAndName('config', 'SUPABASE_RENDER_FUNCTION_URL').catch(() => null);
-  const configured = (envConfigured || dbConfigured || '').trim();
-  if (configured) {
-    if (configured.includes(',')) {
-      return configured
-        .split(',')
-        .map((x) => x.trim())
-        .filter(Boolean);
-    }
-    return [configured];
-  }
-
-  const functionName = (
-    process.env.SUPABASE_RENDER_FUNCTION_NAME ||
-    (await getKeyValueByTypeAndName('config', 'SUPABASE_RENDER_FUNCTION_NAME').catch(() => null)) ||
-    ''
-  ).trim();
-
-  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
-  if (!url) return [] as string[];
-  const base = `${url.replace(/\/$/, '')}/functions/v1`;
-
-  if (functionName) {
-    return [`${base}/${functionName}`];
-  }
-
-  return [`${base}/render-video`, `${base}/video-render`, `${base}/render`];
-}
 
 type StorageFile = {
   name: string;
@@ -68,306 +32,87 @@ function makeClient() {
   });
 }
 
-function makeEdgeFunctionHeaders(key: string) {
-  return {
-    Authorization: `Bearer ${key}`,
-    apikey: key,
-    'Content-Type': 'application/json',
-  };
-}
+async function listObjectsRecursively(client: ReturnType<typeof makeClient>, folder: string) {
+  const queue = [folder.replace(/^\/+|\/+$/g, '')];
+  const files: Array<{ path: string; size: number; updatedAt: number }> = [];
 
-function getProxyRequestConfig() {
-  const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
-  const httpsAgent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : undefined;
-  return {
-    httpsAgent,
-    proxy: false as const,
-  };
-}
+  while (queue.length) {
+    const current = queue.shift() || '';
+    const response = await client.post(`/object/list/${DEFAULT_BUCKET}`, {
+      prefix: current ? `${current}/` : '',
+      limit: 1000,
+      sortBy: { column: 'updated_at', order: 'desc' },
+    });
 
-function normalizeStorageObjectPath(pathOrUrl: string) {
-  const trimmed = String(pathOrUrl || '').trim();
-  if (!trimmed) return '';
-  if (/^https?:\/\//i.test(trimmed)) return trimmed;
-  const normalized = trimmed.replace(/^\/+/, '');
-  if (normalized.startsWith(`${DEFAULT_BUCKET}/`)) {
-    return normalized.slice(DEFAULT_BUCKET.length + 1);
-  }
-  return normalized;
-}
-
-async function downloadRenderedVideo(client: ReturnType<typeof makeClient>, renderedPathOrUrl: string, jobId: string) {
-  const normalized = normalizeStorageObjectPath(renderedPathOrUrl);
-  const localOutput = path.join(process.cwd(), 'database/assets/videos', `${jobId}.mp4`);
-  await fs.ensureDir(path.dirname(localOutput));
-
-  if (/^https?:\/\//i.test(normalized)) {
-    const download = await axios.get(normalized, { responseType: 'arraybuffer', timeout: 180_000, ...getProxyRequestConfig() });
-    await fs.writeFile(localOutput, Buffer.from(download.data));
-    return { localOutput, outputPath: renderedPathOrUrl };
-  }
-
-  const download = await client.get(`/object/${DEFAULT_BUCKET}/${normalized}`, { responseType: 'arraybuffer', timeout: 180_000 });
-  await fs.writeFile(localOutput, Buffer.from(download.data));
-  return { localOutput, outputPath: normalized };
-}
-
-
-async function emergencyFallbackRender(jobId: string, reason: string) {
-  const localOutput = path.join(process.cwd(), 'database/assets/videos', `${jobId}.mp4`);
-  await fs.ensureDir(path.dirname(localOutput));
-  const response = await axios.get(EMERGENCY_VIDEO_URL, {
-    responseType: 'arraybuffer',
-    timeout: 120_000,
-    headers: { 'User-Agent': 'ScamVideo-EmergencyRender/1.0' },
-  });
-  await fs.writeFile(localOutput, Buffer.from(response.data));
-  console.warn(`[render:${jobId}] emergency_fallback=true reason=${reason} source=${EMERGENCY_VIDEO_URL}`);
-  return {
-    localOutput,
-    tempPaths: [],
-    outputPath: localOutput,
-    renderProvider: 'emergency_http_fallback',
-    renderStatus: 'fallback_success',
-    renderLogs: { reason, source: EMERGENCY_VIDEO_URL },
-    functionUrl: '',
-    outputDurationSec: 0,
-    subtitlesBurned: false,
-  };
-}
-
-async function ensureMediaBucket() {
-  const client = makeClient();
-  try {
-    await client.get(`/bucket/${DEFAULT_BUCKET}`);
-  } catch (error: any) {
-    if (error?.response?.status === 404 || error?.response?.data?.error === 'Bucket not found') {
-      await client.post('/bucket', { id: DEFAULT_BUCKET, name: DEFAULT_BUCKET, public: false });
-      return;
+    const items: StorageFile[] = Array.isArray(response.data) ? response.data : [];
+    for (const item of items) {
+      const itemName = String(item.name || '').trim();
+      if (!itemName) continue;
+      const itemPath = current ? `${current}/${itemName}` : itemName;
+      const isFolder = !item.id && itemName.endsWith('/');
+      if (isFolder) {
+        queue.push(itemPath.replace(/\/+$/, ''));
+        continue;
+      }
+      const size = Number(item.metadata?.size || 0);
+      const updatedAt = new Date(item.updated_at || 0).getTime();
+      files.push({ path: itemPath, size, updatedAt: Number.isFinite(updatedAt) ? updatedAt : 0 });
     }
-    throw error;
   }
+
+  return files;
 }
 
 export async function uploadLocalAssetToSupabase(localPath: string, remotePath: string, contentType: string) {
-  await ensureMediaBucket();
   const client = makeClient();
-  const bytes = await fs.readFile(localPath);
-  await client.post(`/object/${DEFAULT_BUCKET}/${remotePath}`, bytes, {
+  const data = await fs.readFile(localPath);
+  const normalized = remotePath.replace(/^\/+/, '');
+
+  await client.post(`/object/${DEFAULT_BUCKET}/${normalized}`, data, {
     headers: {
       'Content-Type': contentType,
       'x-upsert': 'true',
     },
+    maxBodyLength: Infinity,
+    maxContentLength: Infinity,
   });
 
-  return remotePath;
+  return normalized;
 }
 
 export async function deleteSupabaseAssets(paths: string[]) {
   if (!paths.length) return;
   const client = makeClient();
-  await client.delete(`/object/${DEFAULT_BUCKET}`, { data: { prefixes: paths } });
+  const normalized = paths.map((p) => p.replace(/^\/+/, '')).filter(Boolean);
+  if (!normalized.length) return;
+  await client.delete(`/object/${DEFAULT_BUCKET}`, { data: { prefixes: normalized } });
 }
 
 export async function pruneSupabaseTempAssets(prefix = 'jobs/', maxAgeHours = 24, maxBytes = 1_500_000_000) {
   const client = makeClient();
-  const response = await client.post(`/object/list/${DEFAULT_BUCKET}`, {
-    prefix,
-    limit: 1000,
-    sortBy: { column: 'updated_at', order: 'asc' },
-  });
+  const all = await listObjectsRecursively(client, prefix);
+  if (!all.length) return;
 
-  const files = (Array.isArray(response.data) ? response.data : []) as StorageFile[];
   const now = Date.now();
-  let runningBytes = files.reduce((acc, file) => acc + Number(file?.metadata?.size || 0), 0);
-  const toDelete: string[] = [];
+  const maxAgeMs = maxAgeHours * 60 * 60 * 1000;
 
-  for (const file of files) {
-    const updatedAtMs = new Date(file.updated_at || 0).getTime();
-    const ageHours = Number.isFinite(updatedAtMs) ? (now - updatedAtMs) / (1000 * 60 * 60) : Number.POSITIVE_INFINITY;
-    const size = Number(file?.metadata?.size || 0);
-
-    if (ageHours > maxAgeHours || runningBytes > maxBytes) {
-      toDelete.push(path.posix.join(prefix, file.name));
-      runningBytes -= size;
-    }
+  const old = all.filter((x) => now - x.updatedAt > maxAgeMs).map((x) => x.path);
+  if (old.length) {
+    await deleteSupabaseAssets(old);
   }
 
-  await deleteSupabaseAssets(toDelete);
-  return { deleted: toDelete.length };
-}
+  const sorted = [...all].sort((a, b) => b.updatedAt - a.updatedAt);
+  let total = sorted.reduce((sum, file) => sum + Math.max(0, file.size), 0);
+  if (total <= maxBytes) return;
 
-
-export async function validateSupabaseRenderFunctionEndpoint() {
-  const fnUrls = await resolveRenderFunctionUrls();
-  if (!fnUrls.length) {
-    throw new Error('Supabase render function URL is not configured');
+  const overflow: string[] = [];
+  for (let i = sorted.length - 1; i >= 0 && total > maxBytes; i--) {
+    const file = sorted[i];
+    overflow.push(file.path);
+    total -= Math.max(0, file.size);
   }
 
-  const { key } = getConfig();
-  let lastError: any = null;
-
-  for (const fnUrl of fnUrls) {
-    try {
-      const response = await axios.post(
-        fnUrl,
-        { healthcheck: true },
-        {
-          headers: makeEdgeFunctionHeaders(key),
-          timeout: 15_000,
-          validateStatus: () => true,
-          ...getProxyRequestConfig(),
-        }
-      );
-
-      if (response.status === 404) {
-        lastError = new Error(`404 at ${fnUrl}`);
-        continue;
-      }
-
-      if (response.status >= 400) {
-        lastError = new Error(`preflight status=${response.status} at ${fnUrl}: ${JSON.stringify(response.data || {})}`);
-        continue;
-      }
-
-      console.info(`[render:preflight] render_provider=supabase_only endpoint=${fnUrl} probe_status=${response.status}`);
-      return { functionUrl: fnUrl, status: response.status };
-    } catch (error: any) {
-      lastError = error;
-    }
+  if (overflow.length) {
+    await deleteSupabaseAssets(overflow);
   }
-
-  if (ALLOW_RENDER_EMERGENCY_FALLBACK) {
-    console.warn(`[render:preflight] Supabase render endpoint unavailable; emergency fallback enabled source=${EMERGENCY_VIDEO_URL}`);
-    return { functionUrl: EMERGENCY_VIDEO_URL, status: 200, fallback: true };
-  }
-
-  throw new Error(`Supabase render function unavailable. Tried URLs: ${fnUrls.join(', ')}. Last error: ${lastError?.message || lastError}`);
-}
-
-export async function renderVideoViaSupabaseFunction(payload: {
-  jobId: string;
-  audioPath: string;
-  imagePaths: string[];
-  subtitleLines: string[];
-  subtitleEvents?: Array<{ text: string; start: number; end: number }>;
-  subtitleAss?: string;
-  voiceoverMeta?: { voiceId: string; timingSource: string; durationSec: number } | null;
-}) {
-  const fnUrls = await resolveRenderFunctionUrls();
-  if (!fnUrls.length) {
-    throw new Error('Supabase render function URL is not configured');
-  }
-
-  const client = makeClient();
-
-  const uploadedAudio = await uploadLocalAssetToSupabase(payload.audioPath, `jobs/${payload.jobId}/audio.mp3`, 'audio/mpeg');
-
-  let uploadedSubtitleAss = '';
-  if (payload.subtitleAss) {
-    const subtitleLocal = path.join(process.cwd(), 'database/assets/videos', `${payload.jobId}.ass`);
-    await fs.ensureDir(path.dirname(subtitleLocal));
-    await fs.writeFile(subtitleLocal, payload.subtitleAss, 'utf8');
-    uploadedSubtitleAss = await uploadLocalAssetToSupabase(subtitleLocal, `jobs/${payload.jobId}/subtitles.ass`, 'text/x-ass');
-  }
-
-  const uploadedImages: string[] = [];
-  for (let i = 0; i < payload.imagePaths.length; i++) {
-    uploadedImages.push(await uploadLocalAssetToSupabase(payload.imagePaths[i], `jobs/${payload.jobId}/scene_${i}.png`, 'image/png'));
-  }
-
-  const { key } = getConfig();
-  let response: any = null;
-  let lastError: any = null;
-  let usedUrl = "";
-
-  for (const fnUrl of fnUrls) {
-    try {
-      response = await axios.post(
-        fnUrl,
-        {
-          jobId: payload.jobId,
-          bucket: DEFAULT_BUCKET,
-          audioPath: uploadedAudio,
-          imagePaths: uploadedImages,
-          subtitleLines: payload.subtitleLines,
-          subtitleEvents: payload.subtitleEvents || [],
-          subtitleAssPath: uploadedSubtitleAss || "",
-          subtitleAss: payload.subtitleAss || "",
-          voiceoverMeta: payload.voiceoverMeta || null,
-          renderProvider: "supabase_only",
-          outputPath: `jobs/${payload.jobId}/render.mp4`,
-        },
-        {
-          headers: makeEdgeFunctionHeaders(key),
-          timeout: 600_000,
-          validateStatus: () => true,
-        }
-      );
-
-      if (response.status === 404) {
-        console.warn(`[render:${payload.jobId}] Supabase function not found at ${fnUrl}; trying next candidate`);
-        response = null;
-        lastError = new Error(`404 at ${fnUrl}`);
-        continue;
-      }
-
-      if (response.status >= 400) {
-        lastError = new Error(`render status=${response.status} at ${fnUrl}: ${JSON.stringify(response.data || {})}`);
-        console.warn(`[render:${payload.jobId}] Supabase function error at ${fnUrl}; status=${response.status}; trying fallback/next`);
-        response = null;
-        continue;
-      }
-
-      usedUrl = fnUrl;
-      console.info(`[render:${payload.jobId}] render_provider=supabase_only supabase_function_url=${fnUrl} status=${response.status}`);
-      break;
-    } catch (error: any) {
-      lastError = error;
-      const status = error?.response?.status;
-      if (status === 404) {
-        console.warn(`[render:${payload.jobId}] Supabase function not found at ${fnUrl}; trying next candidate`);
-        continue;
-      }
-      if (ALLOW_RENDER_EMERGENCY_FALLBACK) {
-        console.warn(`[render:${payload.jobId}] Supabase request exception; emergency fallback path enabled`, error?.message || error);
-        continue;
-      }
-      throw error;
-    }
-  }
-
-  if (!response) {
-    if (ALLOW_RENDER_EMERGENCY_FALLBACK) {
-      return emergencyFallbackRender(payload.jobId, `supabase_unavailable:${lastError?.message || lastError}`);
-    }
-    throw new Error(`Supabase render function unavailable. Tried URLs: ${fnUrls.join(', ')}. Last error: ${lastError?.message || lastError}`);
-  }
-
-  const renderedPath = (response?.data?.outputPath || response?.data?.result?.outputPath || response?.data?.url || response?.data?.result?.url || response?.data?.signedUrl || response?.data?.result?.signedUrl) as string | undefined;
-  if (!renderedPath) {
-    throw new Error(`Supabase render function response missing outputPath: ${JSON.stringify(response?.data || {})}`);
-  }
-
-  const { localOutput, outputPath } = await downloadRenderedVideo(client, renderedPath, payload.jobId);
-
-
-  const renderStatus = String(response?.data?.status || response?.data?.result?.status || 'success');
-  const renderLogs = response?.data?.logs || response?.data?.result?.logs || null;
-  const outputDurationSec = Number(response?.data?.durationSec || response?.data?.result?.durationSec || 0);
-  const subtitlesBurned = Boolean(response?.data?.subtitlesBurned ?? response?.data?.result?.subtitlesBurned ?? payload.subtitleEvents?.length);
-  if (renderLogs) {
-    console.info(`[render:${payload.jobId}] render_provider=supabase_only render_logs=${JSON.stringify(renderLogs)}`);
-  }
-  return {
-    localOutput,
-    tempPaths: [uploadedAudio, ...uploadedImages, ...(uploadedSubtitleAss ? [uploadedSubtitleAss] : []), outputPath],
-    outputPath,
-    renderProvider: "supabase_only",
-    renderStatus,
-    renderLogs,
-    functionUrl: usedUrl,
-    outputDurationSec,
-    subtitlesBurned,
-  };
 }

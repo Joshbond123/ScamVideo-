@@ -11,6 +11,21 @@ const STOP_WORDS = new Set([
 const HISTORY_LOOKBACK = 250;
 const RECENT_SELECTION_TTL_MS = 1000 * 60 * 60 * 6;
 const recentSelectionsByNiche = new Map<string, Array<{ topic: string; at: number }>>();
+
+function buildFallbackQueries(niche: string) {
+  const cleaned = String(niche || '').trim() || 'crypto scam';
+  const root = cleaned.replace(/[&/]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const generic = [
+    `${root} latest news`,
+    `${root} arrests`,
+    `${root} victims`,
+    `${root} warning signs`,
+    `crypto fraud latest`,
+    `blockchain scam investigation`,
+  ];
+  return Array.from(new Set(generic.map((q) => q.trim()).filter(Boolean)));
+}
+
 const NICHE_QUERIES: Record<string, string[]> = {
   'Romance & Pig-Butchering Crypto Scams': [
     'pig butchering crypto scam latest',
@@ -166,7 +181,7 @@ async function fetchRssTitles(url: string): Promise<string[]> {
 }
 
 export async function discoverTopics(niche: string): Promise<{ topics: string[]; source: string; sourceUrls: string[] }> {
-  const queries = NICHE_QUERIES[niche] || [];
+  const queries = (NICHE_QUERIES[niche] || []).length ? NICHE_QUERIES[niche] : buildFallbackQueries(niche);
   const titles: string[] = [];
   const sourceUrls: string[] = [];
 
