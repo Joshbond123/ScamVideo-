@@ -1,20 +1,40 @@
 name: gstreamer-render
 run-name: Render ${{ github.event.inputs.job_id || github.event.client_payload.job_id }}
 
-'on':
+on:
   workflow_dispatch:
     inputs:
-      job_id: { required: true, type: string }
-      supabase_url: { required: true, type: string }
-      supabase_service_role_key: { required: true, type: string }
-      bucket: { required: true, type: string }
-      audio_path: { required: true, type: string }
-      image_paths_json: { required: true, type: string }
-      subtitle_events_json: { required: true, type: string }
-      output_path: { required: true, type: string }
-      voice_duration_sec: { required: true, type: string }
+      job_id:
+        description: Render job ID
+        required: true
+        type: string
+      supabase_url:
+        required: true
+        type: string
+      supabase_service_role_key:
+        required: true
+        type: string
+      bucket:
+        required: true
+        type: string
+      audio_path:
+        required: true
+        type: string
+      image_paths_json:
+        required: true
+        type: string
+      subtitle_events_json:
+        required: true
+        type: string
+      output_path:
+        required: true
+        type: string
+      voice_duration_sec:
+        required: true
+        type: string
   repository_dispatch:
-    types: [render_video]
+    types:
+      - render_video
 
 jobs:
   render:
@@ -23,7 +43,15 @@ jobs:
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav jq python3
+          sudo apt-get install -y \
+            gstreamer1.0-tools \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly \
+            gstreamer1.0-libav \
+            jq \
+            python3
 
       - name: Download assets + build SRT
         env:
@@ -46,7 +74,10 @@ image_paths = json.loads(os.environ['IMAGE_PATHS_JSON'])
 subtitle_events = json.loads(os.environ['SUBTITLE_EVENTS_JSON'])
 
 def dl(remote, local):
-    req = urllib.request.Request(f"{base}/storage/v1/object/{bucket}/{remote}", headers={"apikey": key, "Authorization": f"Bearer {key}"})
+    req = urllib.request.Request(
+        f"{base}/storage/v1/object/{bucket}/{remote}",
+        headers={"apikey": key, "Authorization": f"Bearer {key}"},
+    )
     with urllib.request.urlopen(req, timeout=120) as r:
         data = r.read()
     with open(local, 'wb') as f:
