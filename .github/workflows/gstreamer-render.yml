@@ -52,44 +52,52 @@ jobs:
           VOICE_DURATION_SEC: ${{ inputs.voice_duration_sec }}
         run: |
           python3 - <<'PY'
-import os, json, math, urllib.request
+          import os, json, urllib.request
 
-base = os.environ['SUPABASE_URL'].rstrip('/')
-key = os.environ['SUPABASE_SERVICE_ROLE_KEY']
-bucket = os.environ['BUCKET']
-audio_path = os.environ['AUDIO_PATH']
-image_paths = json.loads(os.environ['IMAGE_PATHS_JSON'])
-subtitle_events = json.loads(os.environ['SUBTITLE_EVENTS_JSON'])
+          base = os.environ['SUPABASE_URL'].rstrip('/')
+          key = os.environ['SUPABASE_SERVICE_ROLE_KEY']
+          bucket = os.environ['BUCKET']
+          audio_path = os.environ['AUDIO_PATH']
+          image_paths = json.loads(os.environ['IMAGE_PATHS_JSON'])
+          subtitle_events = json.loads(os.environ['SUBTITLE_EVENTS_JSON'])
 
-def dl(remote, local):
-    req = urllib.request.Request(f"{base}/storage/v1/object/{bucket}/{remote}", headers={"apikey": key, "Authorization": f"Bearer {key}"})
-    with urllib.request.urlopen(req, timeout=120) as r:
-        data = r.read()
-    with open(local, 'wb') as f:
-        f.write(data)
+          def dl(remote, local):
+              req = urllib.request.Request(
+                  f"{base}/storage/v1/object/{bucket}/{remote}",
+                  headers={"apikey": key, "Authorization": f"Bearer {key}"},
+              )
+              with urllib.request.urlopen(req, timeout=120) as r:
+                  data = r.read()
+              with open(local, 'wb') as f:
+                  f.write(data)
 
-dl(audio_path, 'audio.mp3')
-for idx, p in enumerate(image_paths):
-    dl(p, f'scene_{idx}.png')
+          dl(audio_path, 'audio.mp3')
+          for idx, p in enumerate(image_paths):
+              dl(p, f'scene_{idx}.png')
 
-with open('subtitles.srt', 'w', encoding='utf-8') as f:
-    for i, ev in enumerate(subtitle_events, 1):
-        def ts(v):
-            v=max(0.0, float(v))
-            h=int(v//3600); m=int((v%3600)//60); s=int(v%60); ms=int((v-int(v))*1000)
-            return f"{h:02}:{m:02}:{s:02},{ms:03}"
-        txt = str(ev.get('text','')).strip()
-        if not txt: continue
-        f.write(f"{i}\n{ts(ev.get('start',0))} --> {ts(ev.get('end',0))}\n{txt}\n\n")
+          with open('subtitles.srt', 'w', encoding='utf-8') as f:
+              for i, ev in enumerate(subtitle_events, 1):
+                  def ts(v):
+                      v = max(0.0, float(v))
+                      h = int(v // 3600)
+                      m = int((v % 3600) // 60)
+                      s = int(v % 60)
+                      ms = int((v - int(v)) * 1000)
+                      return f"{h:02}:{m:02}:{s:02},{ms:03}"
 
-n = max(1, len(image_paths))
-d = max(1.0, float(os.environ.get('VOICE_DURATION_SEC') or 1.0))
-fps = max(0.01, n / d)
-num = max(1, int(round(fps * 1000)))
-den = 1000
-with open('render.env','w',encoding='utf-8') as f:
-    f.write(f"SCENE_FPS_NUM={num}\nSCENE_FPS_DEN={den}\n")
-PY
+                  txt = str(ev.get('text', '')).strip()
+                  if not txt:
+                      continue
+                  f.write(f"{i}\\n{ts(ev.get('start', 0))} --> {ts(ev.get('end', 0))}\\n{txt}\\n\\n")
+
+          n = max(1, len(image_paths))
+          d = max(1.0, float(os.environ.get('VOICE_DURATION_SEC') or 1.0))
+          fps = max(0.01, n / d)
+          num = max(1, int(round(fps * 1000)))
+          den = 1000
+          with open('render.env', 'w', encoding='utf-8') as f:
+              f.write(f"SCENE_FPS_NUM={num}\\nSCENE_FPS_DEN={den}\\n")
+          PY
 
       - name: Render MP4 with GStreamer
         run: |
