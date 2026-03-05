@@ -96,7 +96,7 @@ jobs:
                   txt = str(ev.get('text', '')).strip()
                   if not txt:
                       continue
-                  f.write(f"{i}\\n{ts(ev.get('start', 0))} --> {ts(ev.get('end', 0))}\\n{txt}\\n\\n")
+                  f.write(str(i) + "\n" + ts(ev.get('start', 0)) + " --> " + ts(ev.get('end', 0)) + "\n" + txt + "\n\n")
 
           n = max(1, len(image_paths))
           d = max(1.0, float(os.environ.get('VOICE_DURATION_SEC') or 1.0))
