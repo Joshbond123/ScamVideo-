@@ -39,7 +39,7 @@ jobs:
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav gstreamer1.0-plugins-ugly jq python3
+          sudo apt-get install -y gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav gstreamer1.0-plugins-ugly jq python3 ffmpeg
 
       - name: Download assets + build SRT
         env:
@@ -100,29 +100,73 @@ jobs:
 
           n = max(1, len(image_paths))
           d = max(1.0, float(os.environ.get('VOICE_DURATION_SEC') or 1.0))
-          fps = max(0.01, n / d)
-          num = max(1, int(round(fps * 1000)))
-          den = 1000
-          with open('fps.txt', 'w', encoding='utf-8') as f:
-              f.write(f"{num}/{den}")
+          target_fps = 30
+          total_frames = max(target_fps * 2, int(round(d * target_fps)))
+
+          import shutil
+          os.makedirs('frames', exist_ok=True)
+          base_frames = total_frames // n
+          remainder = total_frames % n
+          frame_index = 0
+          for idx in range(n):
+              copies = base_frames + (1 if idx < remainder else 0)
+              src = f'scene_{idx}.png'
+              for _ in range(max(1, copies)):
+                  dst = f'frames/frame_{frame_index:06d}.png'
+                  shutil.copyfile(src, dst)
+                  frame_index += 1
+
+          with open('frame_count.txt', 'w', encoding='utf-8') as f:
+              f.write(str(frame_index))
           PY
 
       - name: Render MP4 with GStreamer
         run: |
           set -euo pipefail
-          FPS=$(cat fps.txt)
-          gst-inspect-1.0 subtitleoverlay >/dev/null
+          FRAME_COUNT=$(cat frame_count.txt)
+          gst-inspect-1.0 textoverlay >/dev/null
           gst-inspect-1.0 x264enc >/dev/null
+          gst-inspect-1.0 multifilesrc >/dev/null
+          gst-inspect-1.0 qtmux >/dev/null
+
           gst-launch-1.0 -e \
-            multifilesrc location="scene_%d.png" index=0 caps="image/png,framerate=${FPS}" ! pngdec ! imagefreeze ! videoconvert ! videoscale ! videorate ! \
-            video/x-raw,format=I420,width=1080,height=1920,framerate=30/1 ! subtitleoverlay name=sub font-desc="Sans Bold 56" ! \
-            x264enc speed-preset=medium tune=zerolatency bitrate=4000 key-int-max=60 bframes=0 cabac=true byte-stream=false aud=true ! \
+            multifilesrc location="frames/frame_%06d.png" index=0 stop-index=$((FRAME_COUNT-1)) caps="image/png,framerate=30/1" ! \
+            pngdec ! videoconvert ! videoscale ! \
+            video/x-raw,format=I420,width=1080,height=1920,framerate=30/1,pixel-aspect-ratio=1/1 ! \
+            textoverlay name=sub font-desc="Sans Bold 62" halignment=center valignment=center line-alignment=center shaded-background=false draw-outline=true draw-shadow=false ! \
+            x264enc speed-preset=medium tune=zerolatency bitrate=4500 key-int-max=60 bframes=2 cabac=true byte-stream=false aud=true ! \
             h264parse config-interval=-1 ! video/x-h264,stream-format=avc,alignment=au,profile=high ! queue ! mux. \
             filesrc location="audio.mp3" ! decodebin ! audioconvert ! audioresample ! audio/x-raw,channels=2,rate=48000 ! voaacenc bitrate=192000 ! aacparse ! queue ! mux. \
-            filesrc location="subtitles.srt" ! subparse ! sub. \
-            mp4mux faststart=true name=mux ! filesink location="render.mp4"
+            filesrc location="subtitles.srt" ! subparse ! sub.text_sink \
+            qtmux faststart=true name=mux ! filesink location="render.mp4"
 
           test -s render.mp4
+          ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 render.mp4 > render_duration.txt
+          ffprobe -v error -select_streams v:0 -count_packets -show_entries stream=nb_read_packets -of csv=p=0 render.mp4 > video_packets.txt
+          DURATION=$(python3 - <<'PY'
+from pathlib import Path
+print(float(Path("render_duration.txt").read_text().strip() or "0"))
+PY
+)
+          PACKETS=$(python3 - <<'PY'
+from pathlib import Path
+raw=Path("video_packets.txt").read_text().strip()
+print(int(raw or "0"))
+PY
+)
+          echo "Rendered duration: ${DURATION}s"
+          echo "Video packets: ${PACKETS}"
+          python3 - <<'PY'
+import sys
+from pathlib import Path
+d=float(Path("render_duration.txt").read_text().strip() or "0")
+p=int(Path("video_packets.txt").read_text().strip() or "0")
+if d < 2.0:
+    raise SystemExit("Rendered duration unexpectedly short; expected multi-scene output")
+if p < 20:
+    raise SystemExit("Rendered video has too few frames/packets; possible static or broken output")
+print("Render output validation passed")
+PY
 
       - name: Upload rendered video to Supabase storage
         env:
@@ -131,9 +175,13 @@ jobs:
           BUCKET: ${{ inputs.bucket }}
           OUTPUT_PATH: ${{ inputs.output_path }}
         run: |
-          curl -sS -X POST "${SUPABASE_URL}/storage/v1/object/${BUCKET}/${OUTPUT_PATH}" \
+          set -euo pipefail
+          UPLOAD_RESPONSE=$(curl -sS --fail-with-body -X POST "${SUPABASE_URL}/storage/v1/object/${BUCKET}/${OUTPUT_PATH}" \
             -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
             -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
             -H "x-upsert: true" \
             -H "Content-Type: video/mp4" \
-            --data-binary @render.mp4
+            --data-binary @render.mp4)
+
+          echo "${UPLOAD_RESPONSE}" | jq -c '.'
+          echo "${UPLOAD_RESPONSE}" | jq -e --arg output_path "${OUTPUT_PATH}" '((.Key // .key // .path // "") | tostring | contains($output_path)) or ((.id // "") | tostring | length > 0)' >/dev/null
