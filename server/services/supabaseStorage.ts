@@ -1,8 +1,6 @@
 import axios from 'axios';
 import fs from 'fs-extra';
-import { HttpsProxyAgent } from 'https-proxy-agent';
-
-const DEFAULT_BUCKET = process.env.SUPABASE_MEDIA_BUCKET || 'temp-media';
+import path from 'path';
 
 type StorageFile = {
   name: string;
@@ -10,6 +8,8 @@ type StorageFile = {
   metadata?: { size?: number };
   updated_at?: string;
 };
+
+const DEFAULT_BUCKET = process.env.SUPABASE_MEDIA_BUCKET || 'temp-media';
 
 function getConfig() {
   const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -20,99 +20,78 @@ function getConfig() {
 
 function makeClient() {
   const { url, key } = getConfig();
-  const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
-  const httpsAgent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : undefined;
-
   return axios.create({
     baseURL: `${url}/storage/v1`,
     headers: { apikey: key, Authorization: `Bearer ${key}` },
-    httpsAgent,
-    proxy: false,
     timeout: 60_000,
   });
 }
 
-async function listObjectsRecursively(client: ReturnType<typeof makeClient>, folder: string) {
-  const queue = [folder.replace(/^\/+|\/+$/g, '')];
-  const files: Array<{ path: string; size: number; updatedAt: number }> = [];
-
-  while (queue.length) {
-    const current = queue.shift() || '';
-    const response = await client.post(`/object/list/${DEFAULT_BUCKET}`, {
-      prefix: current ? `${current}/` : '',
-      limit: 1000,
-      sortBy: { column: 'updated_at', order: 'desc' },
-    });
-
-    const items: StorageFile[] = Array.isArray(response.data) ? response.data : [];
-    for (const item of items) {
-      const itemName = String(item.name || '').trim();
-      if (!itemName) continue;
-      const itemPath = current ? `${current}/${itemName}` : itemName;
-      const isFolder = !item.id && itemName.endsWith('/');
-      if (isFolder) {
-        queue.push(itemPath.replace(/\/+$/, ''));
-        continue;
-      }
-      const size = Number(item.metadata?.size || 0);
-      const updatedAt = new Date(item.updated_at || 0).getTime();
-      files.push({ path: itemPath, size, updatedAt: Number.isFinite(updatedAt) ? updatedAt : 0 });
+async function ensureMediaBucket() {
+  const client = makeClient();
+  try {
+    await client.get(`/bucket/${DEFAULT_BUCKET}`);
+  } catch (error: any) {
+    if (error?.response?.status === 404 || error?.response?.data?.error === 'Bucket not found') {
+      await client.post('/bucket', { id: DEFAULT_BUCKET, name: DEFAULT_BUCKET, public: false });
+      return;
     }
+    throw error;
   }
-
-  return files;
 }
 
 export async function uploadLocalAssetToSupabase(localPath: string, remotePath: string, contentType: string) {
+  await ensureMediaBucket();
   const client = makeClient();
-  const data = await fs.readFile(localPath);
-  const normalized = remotePath.replace(/^\/+/, '');
-
-  await client.post(`/object/${DEFAULT_BUCKET}/${normalized}`, data, {
+  const bytes = await fs.readFile(localPath);
+  await client.post(`/object/${DEFAULT_BUCKET}/${remotePath}`, bytes, {
     headers: {
       'Content-Type': contentType,
       'x-upsert': 'true',
     },
-    maxBodyLength: Infinity,
-    maxContentLength: Infinity,
   });
 
-  return normalized;
+  return remotePath;
 }
 
 export async function deleteSupabaseAssets(paths: string[]) {
   if (!paths.length) return;
   const client = makeClient();
-  const normalized = paths.map((p) => p.replace(/^\/+/, '')).filter(Boolean);
-  if (!normalized.length) return;
-  await client.delete(`/object/${DEFAULT_BUCKET}`, { data: { prefixes: normalized } });
+  await client.delete(`/object/${DEFAULT_BUCKET}`, { data: { prefixes: paths } });
+}
+
+export async function downloadSupabaseAssetToLocal(remotePath: string, localPath: string) {
+  const client = makeClient();
+  const download = await client.get(`/object/${DEFAULT_BUCKET}/${remotePath}`, { responseType: 'arraybuffer' });
+  await fs.ensureDir(path.dirname(localPath));
+  await fs.writeFile(localPath, Buffer.from(download.data));
+  return localPath;
 }
 
 export async function pruneSupabaseTempAssets(prefix = 'jobs/', maxAgeHours = 24, maxBytes = 1_500_000_000) {
   const client = makeClient();
-  const all = await listObjectsRecursively(client, prefix);
-  if (!all.length) return;
+  const response = await client.post(`/object/list/${DEFAULT_BUCKET}`, {
+    prefix,
+    limit: 1000,
+    sortBy: { column: 'updated_at', order: 'asc' },
+  });
 
+  const files = (Array.isArray(response.data) ? response.data : []) as StorageFile[];
   const now = Date.now();
-  const maxAgeMs = maxAgeHours * 60 * 60 * 1000;
+  let runningBytes = files.reduce((acc, file) => acc + Number(file?.metadata?.size || 0), 0);
+  const toDelete: string[] = [];
 
-  const old = all.filter((x) => now - x.updatedAt > maxAgeMs).map((x) => x.path);
-  if (old.length) {
-    await deleteSupabaseAssets(old);
+  for (const file of files) {
+    const updatedAtMs = new Date(file.updated_at || 0).getTime();
+    const ageHours = Number.isFinite(updatedAtMs) ? (now - updatedAtMs) / (1000 * 60 * 60) : Number.POSITIVE_INFINITY;
+    const size = Number(file?.metadata?.size || 0);
+
+    if (ageHours > maxAgeHours || runningBytes > maxBytes) {
+      toDelete.push(path.posix.join(prefix, file.name));
+      runningBytes -= size;
+    }
   }
 
-  const sorted = [...all].sort((a, b) => b.updatedAt - a.updatedAt);
-  let total = sorted.reduce((sum, file) => sum + Math.max(0, file.size), 0);
-  if (total <= maxBytes) return;
-
-  const overflow: string[] = [];
-  for (let i = sorted.length - 1; i >= 0 && total > maxBytes; i--) {
-    const file = sorted[i];
-    overflow.push(file.path);
-    total -= Math.max(0, file.size);
-  }
-
-  if (overflow.length) {
-    await deleteSupabaseAssets(overflow);
-  }
+  await deleteSupabaseAssets(toDelete);
+  return { deleted: toDelete.length };
 }
