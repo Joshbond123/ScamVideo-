@@ -5,10 +5,38 @@ import { createServer as createViteServer } from 'vite';
 import axios from 'axios';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { initDb, readJson, updateJson, writeJson, PATHS, appendJson } from './server/db';
-import { deleteApiKey, insertApiKey, listApiKeys, patchApiKey } from './server/services/supabaseKeyStore';
+import {
+  deleteApiKey,
+  deleteConfigCredential,
+  insertApiKey,
+  listApiKeys,
+  listConfigCredentialsByName,
+  patchApiKey,
+  upsertConfigCredential,
+} from './server/services/supabaseKeyStore';
 import { startScheduler, runJob, requestSchedulerRefresh } from './server/scheduler';
 import { verifyTokenAndGetPages } from './server/services/facebookService';
 import { ApiKey, Schedule } from './src/types';
+
+const INFRA_CREDENTIAL_KEYS = [
+  'CLOUDFLARE_ACCOUNT_ID',
+  'SUPABASE_URL',
+  'SUPABASE_SERVICE_ROLE_KEY',
+  'SUPABASE_ACCESS_TOKEN',
+  'GITHUB_PAT',
+] as const;
+
+type InfraCredentialKey = (typeof INFRA_CREDENTIAL_KEYS)[number];
+
+function isInfraCredentialKey(value: string): value is InfraCredentialKey {
+  return INFRA_CREDENTIAL_KEYS.includes(value as InfraCredentialKey);
+}
+
+function maskSecret(value: string) {
+  if (!value) return '';
+  if (value.length <= 6) return '••••••';
+  return `${value.slice(0, 3)}••••••${value.slice(-3)}`;
+}
 
 function parseScheduleIdFromMessage(message: string): string | null {
   const match = /id=([a-zA-Z0-9-]+)/.exec(message || '');
@@ -82,6 +110,61 @@ async function startServer() {
     const current = await readJson<any>(PATHS.settings);
     await writeJson(PATHS.settings, { ...current, catboxHash: '' });
     res.json({ success: true });
+  });
+
+  app.get('/api/infrastructure-credentials', async (_req, res) => {
+    try {
+      const rows = await listConfigCredentialsByName([...INFRA_CREDENTIAL_KEYS]);
+      const byName = new Map(rows.map((row) => [row.keyName, row]));
+
+      const payload = INFRA_CREDENTIAL_KEYS.map((keyName) => {
+        const found = byName.get(keyName);
+        const value = String(found?.value || '').trim();
+        return {
+          keyName,
+          valueMasked: value ? maskSecret(value) : '',
+          status: value ? 'configured' : 'missing',
+          updatedAt: found?.updatedAt,
+        };
+      });
+
+      res.json(payload);
+    } catch (error: any) {
+      res.status(500).json({ error: error?.message || 'Failed to load infrastructure credentials.' });
+    }
+  });
+
+  app.post('/api/infrastructure-credentials', async (req, res) => {
+    const keyName = String(req.body?.keyName || '').trim();
+    const value = String(req.body?.value || '');
+
+    if (!isInfraCredentialKey(keyName)) {
+      return res.status(400).json({ error: 'Invalid infrastructure credential key.' });
+    }
+    if (!value.trim()) {
+      return res.status(400).json({ error: `Value is required for ${keyName}.` });
+    }
+
+    try {
+      await upsertConfigCredential(keyName, value.trim());
+      return res.json({ success: true });
+    } catch (error: any) {
+      return res.status(500).json({ error: error?.message || 'Failed to save infrastructure credential.' });
+    }
+  });
+
+  app.delete('/api/infrastructure-credentials/:keyName', async (req, res) => {
+    const keyName = String(req.params.keyName || '').trim();
+    if (!isInfraCredentialKey(keyName)) {
+      return res.status(400).json({ error: 'Invalid infrastructure credential key.' });
+    }
+
+    try {
+      await deleteConfigCredential(keyName);
+      return res.json({ success: true });
+    } catch (error: any) {
+      return res.status(500).json({ error: error?.message || 'Failed to delete infrastructure credential.' });
+    }
   });
 
   app.get('/api/keys/:provider', async (req, res) => {

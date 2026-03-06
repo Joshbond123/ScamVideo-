@@ -1,4 +1,5 @@
 import axios from 'axios';
+import crypto from 'crypto';
 import { ApiKey } from '../../src/types';
 
 type ApiKeyRow = {
@@ -16,6 +17,14 @@ type GenericKeyRow = {
   key_type: string;
   key_name: string | null;
   encrypted_key: string;
+  updated_at?: string;
+};
+
+export type ConfigCredentialRow = {
+  id: string;
+  keyName: string;
+  value: string;
+  updatedAt?: string;
 };
 
 function getSupabaseConfigOrThrow() {
@@ -86,6 +95,91 @@ export async function getKeyValueByTypeAndName(keyType: string, keyName: string)
   const rows = Array.isArray(response.data) ? response.data : [];
   const row = (rows[0] as GenericKeyRow | undefined) || null;
   return row?.encrypted_key || null;
+}
+
+export async function listConfigCredentialsByName(keyNames: string[]): Promise<ConfigCredentialRow[]> {
+  if (!Array.isArray(keyNames) || keyNames.length === 0) return [];
+
+  const client = getSupabaseRestClient();
+  const response = await client.get('/api_keys', {
+    params: {
+      key_type: 'eq.config',
+      select: 'id,key_type,key_name,encrypted_key,updated_at',
+      key_name: `in.(${keyNames.map((k) => `"${k}"`).join(',')})`,
+      order: 'updated_at.desc',
+    },
+  });
+
+  const rows = Array.isArray(response.data) ? response.data : [];
+  const deduped = new Map<string, ConfigCredentialRow>();
+
+  for (const row of rows as GenericKeyRow[]) {
+    const keyName = String(row.key_name || '').trim();
+    if (!keyName || deduped.has(keyName)) continue;
+    deduped.set(keyName, {
+      id: row.id,
+      keyName,
+      value: row.encrypted_key,
+      updatedAt: row.updated_at,
+    });
+  }
+
+  return Array.from(deduped.values());
+}
+
+export async function upsertConfigCredential(keyName: string, value: string): Promise<void> {
+  const existing = await getConfigCredentialRow(keyName);
+  const client = getSupabaseRestClient();
+
+  if (existing) {
+    await client.patch(
+      '/api_keys',
+      { encrypted_key: value, updated_at: new Date().toISOString() },
+      {
+        params: {
+          key_type: 'eq.config',
+          key_name: `eq.${keyName}`,
+        },
+      }
+    );
+    return;
+  }
+
+  await client.post('/api_keys', [
+    {
+      id: crypto.randomUUID(),
+      key_type: 'config',
+      key_name: keyName,
+      encrypted_key: value,
+      metadata: {},
+    },
+  ]);
+}
+
+export async function deleteConfigCredential(keyName: string): Promise<void> {
+  const client = getSupabaseRestClient();
+  await client.delete('/api_keys', {
+    params: {
+      key_type: 'eq.config',
+      key_name: `eq.${keyName}`,
+    },
+  });
+}
+
+async function getConfigCredentialRow(keyName: string): Promise<GenericKeyRow | null> {
+  const client = getSupabaseRestClient();
+  const response = await client.get('/api_keys', {
+    params: {
+      key_type: 'eq.config',
+      key_name: `eq.${keyName}`,
+      select: 'id,key_type,key_name,encrypted_key,updated_at',
+      order: 'updated_at.desc',
+      limit: 1,
+    },
+  });
+
+  const rows = Array.isArray(response.data) ? response.data : [];
+  return (rows[0] as GenericKeyRow | undefined) || null;
 }
 
 export async function listApiKeys(provider: ApiKey['provider']): Promise<ApiKey[]> {

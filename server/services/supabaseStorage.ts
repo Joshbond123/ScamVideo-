@@ -1,6 +1,7 @@
 import axios from 'axios';
 import fs from 'fs-extra';
 import path from 'path';
+import { getKeyValueByTypeAndName } from './supabaseKeyStore';
 
 type StorageFile = {
   name: string;
@@ -11,15 +12,23 @@ type StorageFile = {
 
 const DEFAULT_BUCKET = process.env.SUPABASE_MEDIA_BUCKET || 'temp-media';
 
-function getConfig() {
-  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!url || !key) throw new Error('SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for storage operations');
-  return { url, key };
+async function resolveConfigValue(name: 'SUPABASE_URL' | 'SUPABASE_SERVICE_ROLE_KEY') {
+  const fromEnv = String(process.env[name] || '').trim();
+  if (fromEnv) return fromEnv;
+
+  try {
+    const fromConfig = String((await getKeyValueByTypeAndName('config', name)) || '').trim();
+    if (fromConfig) return fromConfig;
+  } catch {
+    // Continue to throw clear error below.
+  }
+
+  throw new Error(`Missing required configuration ${name}. Set env or save it in Settings → Infrastructure.`);
 }
 
-function makeClient() {
-  const { url, key } = getConfig();
+async function makeClient() {
+  const url = String(process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '').trim() || await resolveConfigValue('SUPABASE_URL');
+  const key = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim() || await resolveConfigValue('SUPABASE_SERVICE_ROLE_KEY');
   return axios.create({
     baseURL: `${url}/storage/v1`,
     headers: { apikey: key, Authorization: `Bearer ${key}` },
@@ -28,7 +37,7 @@ function makeClient() {
 }
 
 async function ensureMediaBucket() {
-  const client = makeClient();
+  const client = await makeClient();
   try {
     await client.get(`/bucket/${DEFAULT_BUCKET}`);
   } catch (error: any) {
@@ -42,7 +51,7 @@ async function ensureMediaBucket() {
 
 export async function uploadLocalAssetToSupabase(localPath: string, remotePath: string, contentType: string) {
   await ensureMediaBucket();
-  const client = makeClient();
+  const client = await makeClient();
   const bytes = await fs.readFile(localPath);
   await client.post(`/object/${DEFAULT_BUCKET}/${remotePath}`, bytes, {
     headers: {
@@ -56,12 +65,12 @@ export async function uploadLocalAssetToSupabase(localPath: string, remotePath: 
 
 export async function deleteSupabaseAssets(paths: string[]) {
   if (!paths.length) return;
-  const client = makeClient();
+  const client = await makeClient();
   await client.delete(`/object/${DEFAULT_BUCKET}`, { data: { prefixes: paths } });
 }
 
 export async function downloadSupabaseAssetToLocal(remotePath: string, localPath: string) {
-  const client = makeClient();
+  const client = await makeClient();
   const download = await client.get(`/object/${DEFAULT_BUCKET}/${remotePath}`, { responseType: 'arraybuffer' });
   await fs.ensureDir(path.dirname(localPath));
   await fs.writeFile(localPath, Buffer.from(download.data));
@@ -69,7 +78,7 @@ export async function downloadSupabaseAssetToLocal(remotePath: string, localPath
 }
 
 export async function pruneSupabaseTempAssets(prefix = 'jobs/', maxAgeHours = 24, maxBytes = 1_500_000_000) {
-  const client = makeClient();
+  const client = await makeClient();
   const response = await client.post(`/object/list/${DEFAULT_BUCKET}`, {
     prefix,
     limit: 1000,
