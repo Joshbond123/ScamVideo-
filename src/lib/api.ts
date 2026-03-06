@@ -6,6 +6,8 @@ import {
   ApiKey,
   FacebookPage,
   LogEntry,
+  InfrastructureCredential,
+  InfrastructureCredentialKey,
 } from '../types';
 
 const client = axios.create({
@@ -135,6 +137,19 @@ export const api = {
   getCatboxHash: async (): Promise<string> => {
     const res = await client.get('/settings');
     return res.data.catboxHash || '';
+  },
+
+  getInfrastructureCredentials: async (): Promise<InfrastructureCredential[]> => {
+    const res = await client.get('/infrastructure-credentials');
+    return Array.isArray(res.data) ? res.data : [];
+  },
+
+  saveInfrastructureCredential: async (keyName: InfrastructureCredentialKey, value: string): Promise<void> => {
+    await client.post('/infrastructure-credentials', { keyName, value });
+  },
+
+  deleteInfrastructureCredential: async (keyName: InfrastructureCredentialKey): Promise<void> => {
+    await client.delete(`/infrastructure-credentials/${encodeURIComponent(keyName)}`);
   },
 
   getLogs: async (): Promise<LogEntry[]> => {

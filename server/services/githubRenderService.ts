@@ -2,6 +2,7 @@ import axios from 'axios';
 import fs from 'fs-extra';
 import path from 'path';
 import { uploadLocalAssetToSupabase } from './supabaseStorage';
+import { getKeyValueByTypeAndName } from './supabaseKeyStore';
 
 type SubtitleEvent = { text: string; start: number; end: number };
 
@@ -13,20 +14,28 @@ type RenderRequest = {
   voiceoverMeta: { voiceId: string; timingSource: string; durationSec: number };
 };
 
-function requireEnv(name: string) {
-  const value = (process.env[name] || '').trim();
-  if (!value) throw new Error(`Missing required env ${name}`);
-  return value;
+async function readConfigValue(name: string) {
+  const fromEnv = String(process.env[name] || '').trim();
+  if (fromEnv) return fromEnv;
+
+  try {
+    const fromSupabase = String((await getKeyValueByTypeAndName('config', name)) || '').trim();
+    if (fromSupabase) return fromSupabase;
+  } catch {
+    // Ignore lookup failures and throw a clear error below.
+  }
+
+  throw new Error(`Missing required configuration ${name}. Set env or save it in Settings → Infrastructure.`);
 }
 
-function getConfig() {
-  const repo = (process.env.GITHUB_RENDER_REPO || process.env.RENDER_REPO || '').trim() || requireEnv('GITHUB_RENDER_REPO');
-  const token = (process.env.GITHUB_PAT || process.env.RENDER_GITHUB_PAT || '').trim() || requireEnv('GITHUB_PAT');
+async function getConfig() {
+  const repo = (process.env.GITHUB_RENDER_REPO || process.env.RENDER_REPO || '').trim() || await readConfigValue('GITHUB_RENDER_REPO');
+  const token = (process.env.GITHUB_PAT || process.env.RENDER_GITHUB_PAT || '').trim() || await readConfigValue('GITHUB_PAT');
   const workflow = (process.env.GITHUB_RENDER_WORKFLOW || 'gstreamer-render.yml').trim();
   const ref = (process.env.GITHUB_RENDER_REF || 'main').trim();
   const bucket = (process.env.SUPABASE_MEDIA_BUCKET || 'temp-media').trim();
-  const supabaseUrl = requireEnv('SUPABASE_URL');
-  const supabaseServiceRole = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
+  const supabaseUrl = await readConfigValue('SUPABASE_URL');
+  const supabaseServiceRole = await readConfigValue('SUPABASE_SERVICE_ROLE_KEY');
   return { repo, token, workflow, ref, bucket, supabaseUrl, supabaseServiceRole };
 }
 
@@ -43,7 +52,7 @@ function ghClient(token: string) {
 }
 
 async function triggerWorkflow(jobId: string, inputs: Record<string, string>) {
-  const { token, repo, workflow, ref } = getConfig();
+  const { token, repo, workflow, ref } = await getConfig();
   const client = ghClient(token);
   try {
     await client.post(`/repos/${repo}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, {
@@ -73,7 +82,7 @@ async function triggerWorkflow(jobId: string, inputs: Record<string, string>) {
 }
 
 async function waitForWorkflow(jobId: string, startedAt: number) {
-  const { token, repo, workflow } = getConfig();
+  const { token, repo } = await getConfig();
   const client = ghClient(token);
   const timeoutMs = 25 * 60_000;
   const pollMs = 10_000;
@@ -126,7 +135,7 @@ async function downloadOutputFromSupabase(bucket: string, outputPath: string, lo
 }
 
 export async function renderVideoViaGitHubActions(payload: RenderRequest) {
-  const cfg = getConfig();
+  const cfg = await getConfig();
   const startedAt = Date.now();
   const outputPath = `jobs/${payload.jobId}/render.mp4`;
 
