@@ -59,3 +59,17 @@ Conflict-resolution commit pushed to PR branch:
 - Pull requests merged: **1**
 - Conflicted files fixed: **5**
 - Open pull requests remaining: **0**
+
+---
+
+Date: 2026-03-06 (verification pass)
+
+## Verification summary
+Checked GitHub pull requests with PAT after conflict-resolution operations.
+
+- PR #40 is merged into `main`.
+- Remaining open pull requests: `0`.
+
+## Counts for this conflict-fix cycle
+- Pull requests merged: **1**
+- Conflicted files fixed: **5**
