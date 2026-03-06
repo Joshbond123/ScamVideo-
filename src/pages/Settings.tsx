@@ -1,10 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Box, Eye, EyeOff, Facebook, Key, Pencil, Plus, RefreshCw, Save, Trash2, X } from 'lucide-react';
+import { Box, Eye, EyeOff, Facebook, Key, Pencil, Plus, RefreshCw, Save, ServerCog, Trash2, X } from 'lucide-react';
 import { api } from '../lib/api';
-import { ApiKey, FacebookPage } from '../types';
+import { ApiKey, FacebookPage, InfrastructureCredential, InfrastructureCredentialKey } from '../types';
 import { Badge, Button, Card, Input, Label } from '../components/ui';
 
-type Tab = 'keys' | 'facebook' | 'catbox';
+type Tab = 'keys' | 'facebook' | 'catbox' | 'infrastructure';
 type NoticeType = 'success' | 'error';
 
 type EditKeyState = {
@@ -22,6 +22,36 @@ type EditPageState = {
 
 type ProviderDraftState = Record<ApiKey['provider'], { name: string; key: string }>;
 
+type InfraDraftState = Record<InfrastructureCredentialKey, string>;
+
+const infrastructureFields: Array<{ keyName: InfrastructureCredentialKey; label: string; description: string }> = [
+  {
+    keyName: 'CLOUDFLARE_ACCOUNT_ID',
+    label: 'Cloudflare Account ID',
+    description: 'Used for Workers AI image generation and cloud rendering support.',
+  },
+  {
+    keyName: 'SUPABASE_URL',
+    label: 'Supabase URL',
+    description: 'Supabase project URL used for storage/state operations.',
+  },
+  {
+    keyName: 'SUPABASE_SERVICE_ROLE_KEY',
+    label: 'Supabase Service Role Key',
+    description: 'Privileged key for backend storage and state operations.',
+  },
+  {
+    keyName: 'SUPABASE_ACCESS_TOKEN',
+    label: 'Supabase Access Token',
+    description: 'Used for deployment and infrastructure automation tasks.',
+  },
+  {
+    keyName: 'GITHUB_PAT',
+    label: 'GitHub Personal Access Token',
+    description: 'Used to trigger and monitor GitHub Actions workflows.',
+  },
+];
+
 const providers: Array<{ id: ApiKey['provider']; title: string; description: string }> = [
   { id: 'cerebras', title: 'Cerebras Keys', description: 'Used for script generation.' },
   { id: 'unrealspeech', title: 'UnrealSpeech Keys', description: 'Used for voice generation.' },
@@ -38,6 +68,15 @@ export default function Settings() {
   const [catboxHash, setCatboxHash] = useState('');
   const [facebookCommentUrl, setFacebookCommentUrl] = useState('');
   const [showCatboxHash, setShowCatboxHash] = useState(false);
+  const [infrastructureCredentials, setInfrastructureCredentials] = useState<InfrastructureCredential[]>([]);
+  const [editingInfraKey, setEditingInfraKey] = useState<InfrastructureCredentialKey | null>(null);
+  const [infraDrafts, setInfraDrafts] = useState<InfraDraftState>({
+    CLOUDFLARE_ACCOUNT_ID: '',
+    SUPABASE_URL: '',
+    SUPABASE_SERVICE_ROLE_KEY: '',
+    SUPABASE_ACCESS_TOKEN: '',
+    GITHUB_PAT: '',
+  });
 
   const [addProvider, setAddProvider] = useState<ApiKey['provider'] | null>(null);
   const [providerDrafts, setProviderDrafts] = useState<ProviderDraftState>({
@@ -74,18 +113,20 @@ export default function Settings() {
   async function loadAll() {
     setLoading(true);
     try {
-      const [k1, k2, k3, fbPages, hash, commentUrl] = await Promise.all([
+      const [k1, k2, k3, fbPages, hash, commentUrl, infra] = await Promise.all([
         api.getKeys('cerebras'),
         api.getKeys('unrealspeech'),
         api.getKeys('workers-ai'),
         api.getFacebookPages(),
         api.getCatboxHash(),
         api.getFacebookCommentUrl(),
+        api.getInfrastructureCredentials(),
       ]);
       setKeys([...(k1 || []), ...(k2 || []), ...(k3 || [])]);
       setPages(Array.isArray(fbPages) ? fbPages : []);
       setCatboxHash(typeof hash === 'string' ? hash : '');
       setFacebookCommentUrl(typeof commentUrl === 'string' ? commentUrl : '');
+      setInfrastructureCredentials(Array.isArray(infra) ? infra : []);
     } catch (error) {
       console.error(error);
       showError(error, 'Failed to load settings.');
@@ -105,6 +146,17 @@ export default function Settings() {
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return 'Never';
     return date.toLocaleString();
+  }
+
+  function formatMaskedUpdatedAt(value?: string) {
+    if (!value) return 'Not set';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return 'Not set';
+    return date.toLocaleString();
+  }
+
+  function getInfraCredentialStatus(keyName: InfrastructureCredentialKey) {
+    return infrastructureCredentials.find((entry) => entry.keyName === keyName) || null;
   }
 
   async function onAddKey(provider: ApiKey['provider']) {
@@ -249,13 +301,46 @@ export default function Settings() {
     }
   }
 
+  async function onSaveInfrastructureCredential(keyName: InfrastructureCredentialKey) {
+    const value = (infraDrafts[keyName] || '').trim();
+    if (!value) {
+      setNotice({ type: 'error', message: `Enter a value for ${keyName}.` });
+      return;
+    }
+
+    try {
+      await api.saveInfrastructureCredential(keyName, value);
+      setInfraDrafts((prev) => ({ ...prev, [keyName]: '' }));
+      setEditingInfraKey(null);
+      await loadAll();
+      showSuccess(`${keyName} saved successfully.`);
+    } catch (error) {
+      console.error(error);
+      showError(error, `Failed to save ${keyName}.`);
+    }
+  }
+
+  async function onDeleteInfrastructureCredential(keyName: InfrastructureCredentialKey) {
+    if (!confirm(`Delete ${keyName}?`)) return;
+    try {
+      await api.deleteInfrastructureCredential(keyName);
+      setInfraDrafts((prev) => ({ ...prev, [keyName]: '' }));
+      setEditingInfraKey(null);
+      await loadAll();
+      showSuccess(`${keyName} deleted successfully.`);
+    } catch (error) {
+      console.error(error);
+      showError(error, `Failed to delete ${keyName}.`);
+    }
+  }
+
   if (loading) return <div className="text-slate-500">Loading settings...</div>;
 
   return (
     <div className="space-y-8">
       <div>
         <h1 className="text-2xl font-bold text-slate-900">Settings</h1>
-        <p className="text-slate-500">Configure API keys, Facebook pages, and Catbox storage.</p>
+        <p className="text-slate-500">Configure API keys, infrastructure credentials, Facebook pages, and Catbox storage.</p>
       </div>
 
       {notice && (
@@ -275,7 +360,7 @@ export default function Settings() {
         </div>
       )}
 
-      <div className="flex items-center gap-2 p-1 bg-slate-100 rounded-xl w-fit">
+      <div className="flex flex-wrap items-center gap-2 p-1 bg-slate-100 rounded-xl w-fit max-w-full">
         <button
           onClick={() => setTab('keys')}
           className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${
@@ -299,6 +384,14 @@ export default function Settings() {
           }`}
         >
           <Box className="w-4 h-4" /> Catbox
+        </button>
+        <button
+          onClick={() => setTab('infrastructure')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${
+            tab === 'infrastructure' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          <ServerCog className="w-4 h-4" /> Infrastructure
         </button>
       </div>
 
@@ -491,6 +584,89 @@ export default function Settings() {
               ))
             )}
           </Card>
+        </div>
+      )}
+
+      {tab === 'infrastructure' && (
+        <div className="space-y-4">
+          <Card className="p-5 space-y-2">
+            <h3 className="font-semibold text-slate-900">Infrastructure Credentials</h3>
+            <p className="text-sm text-slate-500">
+              Manage deployment, rendering, and workflow credentials. Values are stored in Supabase and masked in this UI.
+            </p>
+          </Card>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {infrastructureFields.map((field) => {
+              const credential = getInfraCredentialStatus(field.keyName);
+              const isEditing = editingInfraKey === field.keyName;
+
+              return (
+                <Card key={field.keyName} className="p-4 space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h4 className="font-semibold text-sm text-slate-900">{field.label}</h4>
+                      <p className="text-xs text-slate-500 mt-1">{field.description}</p>
+                    </div>
+                    <Badge variant={credential?.status === 'configured' ? 'success' : 'default'}>
+                      {credential?.status || 'missing'}
+                    </Badge>
+                  </div>
+
+                  <div className="rounded-md border bg-slate-50 px-3 py-2 space-y-1">
+                    <p className="text-xs text-slate-500">Key</p>
+                    <p className="font-mono text-xs break-all">{field.keyName}</p>
+                    <p className="text-xs text-slate-500 mt-2">Current value</p>
+                    <p className="font-mono text-xs break-all">{credential?.valueMasked || 'Not configured'}</p>
+                    <p className="text-xs text-slate-500">Updated: {formatMaskedUpdatedAt(credential?.updatedAt)}</p>
+                  </div>
+
+                  {isEditing ? (
+                    <div className="space-y-2">
+                      <Label>New value for {field.keyName}</Label>
+                      <Input
+                        type="password"
+                        value={infraDrafts[field.keyName]}
+                        onChange={(e) => setInfraDrafts((prev) => ({ ...prev, [field.keyName]: e.target.value }))}
+                        placeholder={`Enter ${field.keyName}`}
+                      />
+                      <div className="flex flex-wrap gap-2 justify-end">
+                        <Button variant="ghost" size="sm" onClick={() => setEditingInfraKey(null)}>
+                          <X className="w-4 h-4 mr-1" /> Cancel
+                        </Button>
+                        <Button size="sm" onClick={() => void onSaveInfrastructureCredential(field.keyName)}>
+                          <Save className="w-4 h-4 mr-1" /> Save
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex flex-wrap gap-2 justify-end">
+                      <Button variant="outline" size="sm" onClick={() => setEditingInfraKey(field.keyName)}>
+                        {credential?.status === 'configured' ? (
+                          <>
+                            <Pencil className="w-4 h-4 mr-1" /> Edit
+                          </>
+                        ) : (
+                          <>
+                            <Plus className="w-4 h-4 mr-1" /> Add
+                          </>
+                        )}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="text-red-600"
+                        onClick={() => void onDeleteInfrastructureCredential(field.keyName)}
+                        disabled={credential?.status !== 'configured'}
+                      >
+                        <Trash2 className="w-4 h-4 mr-1" /> Delete
+                      </Button>
+                    </div>
+                  )}
+                </Card>
+              );
+            })}
+          </div>
         </div>
       )}
 

@@ -69,3 +69,17 @@ export interface DashboardStats {
   scheduledPosts: number;
   publishedThisWeek: number;
 }
+
+export type InfrastructureCredentialKey =
+  | 'CLOUDFLARE_ACCOUNT_ID'
+  | 'SUPABASE_URL'
+  | 'SUPABASE_SERVICE_ROLE_KEY'
+  | 'SUPABASE_ACCESS_TOKEN'
+  | 'GITHUB_PAT';
+
+export interface InfrastructureCredential {
+  keyName: InfrastructureCredentialKey;
+  valueMasked: string;
+  status: 'configured' | 'missing';
+  updatedAt?: string;
+}
