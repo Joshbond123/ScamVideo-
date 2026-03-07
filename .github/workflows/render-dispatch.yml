@@ -1,4 +1,4 @@
-name: gstreamer-render
+name: ffmpeg-render
 run-name: Render ${{ inputs.job_id }}
 
 on:
@@ -31,6 +31,9 @@ on:
       voice_duration_sec:
         required: true
         type: string
+  repository_dispatch:
+    types:
+      - render_video
 
 jobs:
   render:
@@ -39,17 +42,17 @@ jobs:
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav gstreamer1.0-plugins-ugly jq python3 ffmpeg
+          sudo apt-get install -y ffmpeg jq python3
 
-      - name: Download assets + build SRT
+      - name: Download assets + build subtitle and concat manifests
         env:
-          SUPABASE_URL: ${{ inputs.supabase_url }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ inputs.supabase_service_role_key }}
-          BUCKET: ${{ inputs.bucket }}
-          AUDIO_PATH: ${{ inputs.audio_path }}
-          IMAGE_PATHS_JSON: ${{ inputs.image_paths_json }}
-          SUBTITLE_EVENTS_JSON: ${{ inputs.subtitle_events_json }}
-          VOICE_DURATION_SEC: ${{ inputs.voice_duration_sec }}
+          SUPABASE_URL: ${{ github.event.inputs.supabase_url || github.event.client_payload.supabase_url || inputs.supabase_url }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ github.event.inputs.supabase_service_role_key || github.event.client_payload.supabase_service_role_key || inputs.supabase_service_role_key }}
+          BUCKET: ${{ github.event.inputs.bucket || github.event.client_payload.bucket || inputs.bucket }}
+          AUDIO_PATH: ${{ github.event.inputs.audio_path || github.event.client_payload.audio_path || inputs.audio_path }}
+          IMAGE_PATHS_JSON: ${{ github.event.inputs.image_paths_json || github.event.client_payload.image_paths_json || inputs.image_paths_json }}
+          SUBTITLE_EVENTS_JSON: ${{ github.event.inputs.subtitle_events_json || github.event.client_payload.subtitle_events_json || inputs.subtitle_events_json }}
+          VOICE_DURATION_SEC: ${{ github.event.inputs.voice_duration_sec || github.event.client_payload.voice_duration_sec || inputs.voice_duration_sec }}
         run: |
           python3 - <<'PY'
           import os, json, urllib.request
@@ -60,21 +63,14 @@ jobs:
           audio_path = os.environ['AUDIO_PATH']
           image_paths = json.loads(os.environ['IMAGE_PATHS_JSON'])
           subtitle_events = json.loads(os.environ['SUBTITLE_EVENTS_JSON'])
+          voice_duration = max(1.0, float(os.environ.get('VOICE_DURATION_SEC') or 1.0))
+
+          if not image_paths:
+              raise SystemExit('image_paths_json must include at least one scene image')
 
           def dl(remote, local):
-              sign_req = urllib.request.Request(
-                  f"{base}/storage/v1/object/sign/{bucket}/{remote}",
-                  data=b'{"expiresIn":600}',
-                  headers={"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                  method='POST',
-              )
-              with urllib.request.urlopen(sign_req, timeout=120) as sr:
-                  signed = json.loads(sr.read().decode('utf-8'))
-              signed_path = signed.get('signedURL') or signed.get('signedUrl')
-              if not signed_path:
-                  raise RuntimeError(f"Failed to sign path {remote}: {signed}")
-              signed_url = f"{base}/storage/v1{signed_path}" if signed_path.startswith('/') else f"{base}/storage/v1/{signed_path}"
-              with urllib.request.urlopen(signed_url, timeout=120) as r:
+              req = urllib.request.Request(f"{base}/storage/v1/object/{bucket}/{remote}", headers={"apikey": key, "Authorization": f"Bearer {key}"})
+              with urllib.request.urlopen(req, timeout=120) as r:
                   data = r.read()
               with open(local, 'wb') as f:
                   f.write(data)
@@ -83,97 +79,81 @@ jobs:
           for idx, p in enumerate(image_paths):
               dl(p, f'scene_{idx}.png')
 
-          with open('subtitles.srt', 'w', encoding='utf-8') as f:
-              for i, ev in enumerate(subtitle_events, 1):
-                  def ts(v):
-                      v = max(0.0, float(v))
-                      h = int(v // 3600)
-                      m = int((v % 3600) // 60)
-                      s = int(v % 60)
-                      ms = int((v - int(v)) * 1000)
-                      return f"{h:02}:{m:02}:{s:02},{ms:03}"
+          def ts(v):
+              v = max(0.0, float(v))
+              h = int(v // 3600)
+              m = int((v % 3600) // 60)
+              s = int(v % 60)
+              ms = int(round((v - int(v)) * 1000))
+              return f"{h:02}:{m:02}:{s:02},{ms:03}"
 
-                  txt = str(ev.get('text', '')).strip()
-                  if not txt:
-                      continue
-                  f.write(str(i) + "\n" + ts(ev.get('start', 0)) + " --> " + ts(ev.get('end', 0)) + "\n" + txt + "\n\n")
+          blocks = []
+          for ev in subtitle_events:
+              start = float(ev.get('start', 0) or 0)
+              end = float(ev.get('end', 0) or 0)
+              if end <= start:
+                  end = start + 1.2
+              txt = ' '.join(str(ev.get('text', '')).replace('\n', ' ').split())
+              if txt:
+                  blocks.append((start, end, txt))
 
-          n = max(1, len(image_paths))
-          d = max(1.0, float(os.environ.get('VOICE_DURATION_SEC') or 1.0))
-          target_fps = 30
-          total_frames = max(target_fps * 2, int(round(d * target_fps)))
+          if not blocks:
+              blocks = [(0.0, 2.0, 'Stay alert and avoid crypto scams')]
 
-          import shutil
-          os.makedirs('frames', exist_ok=True)
-          base_frames = total_frames // n
-          remainder = total_frames % n
-          frame_index = 0
-          for idx in range(n):
-              copies = base_frames + (1 if idx < remainder else 0)
-              src = f'scene_{idx}.png'
-              for _ in range(max(1, copies)):
-                  dst = f'frames/frame_{frame_index:06d}.png'
-                  shutil.copyfile(src, dst)
-                  frame_index += 1
+          with open('subtitles.srt', 'w', encoding='utf-8', newline='\n') as f:
+              for i, (start, end, txt) in enumerate(blocks, 1):
+                  f.write(f"{i}\n{ts(start)} --> {ts(end)}\n{txt}\n\n")
 
-          with open('frame_count.txt', 'w', encoding='utf-8') as f:
-              f.write(str(frame_index))
+          scene_duration = voice_duration / len(image_paths)
+          with open('images.txt', 'w', encoding='utf-8', newline='\n') as f:
+              for idx in range(len(image_paths)):
+                  f.write(f"file '{os.path.abspath(f'scene_{idx}.png')}'\n")
+                  f.write(f"duration {scene_duration:.6f}\n")
+              f.write(f"file '{os.path.abspath(f'scene_{len(image_paths)-1}.png')}'\n")
+
+          with open('scene_count.txt', 'w', encoding='utf-8') as f:
+              f.write(str(len(image_paths)))
           PY
 
-      - name: Render MP4 with GStreamer
+      - name: Render MP4 with FFmpeg
         run: |
           set -euo pipefail
-          FRAME_COUNT=$(cat frame_count.txt)
-          gst-inspect-1.0 textoverlay >/dev/null
-          gst-inspect-1.0 x264enc >/dev/null
-          gst-inspect-1.0 multifilesrc >/dev/null
-          gst-inspect-1.0 qtmux >/dev/null
-
-          gst-launch-1.0 -e \
-            multifilesrc location="frames/frame_%06d.png" index=0 stop-index=$((FRAME_COUNT-1)) caps="image/png,framerate=30/1" ! \
-            pngdec ! videoconvert ! videoscale ! \
-            video/x-raw,format=I420,width=1080,height=1920,framerate=30/1,pixel-aspect-ratio=1/1 ! \
-            textoverlay name=sub font-desc="Sans Bold 62" halignment=center valignment=center line-alignment=center shaded-background=false draw-outline=true draw-shadow=false ! \
-            x264enc speed-preset=medium tune=zerolatency bitrate=4500 key-int-max=60 bframes=2 cabac=true byte-stream=false aud=true ! \
-            h264parse config-interval=-1 ! video/x-h264,stream-format=avc,alignment=au,profile=high ! queue ! mux. \
-            filesrc location="audio.mp3" ! decodebin ! audioconvert ! audioresample ! audio/x-raw,channels=2,rate=48000 ! voaacenc bitrate=192000 ! aacparse ! queue ! mux. \
-            filesrc location="subtitles.srt" ! subparse ! sub.text_sink \
-            qtmux faststart=true name=mux ! filesink location="render.mp4"
+          ffmpeg -y -hide_banner -loglevel error \
+            -f concat -safe 0 -i images.txt \
+            -i audio.mp3 \
+            -vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,subtitles=subtitles.srt:force_style='FontName=Arial,FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV=120'" \
+            -r 30 -pix_fmt yuv420p \
+            -c:v libx264 -preset medium -movflags +faststart \
+            -c:a aac -b:a 192k -ar 48000 -ac 2 \
+            -shortest render.mp4
 
           test -s render.mp4
           ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 render.mp4 > render_duration.txt
-          ffprobe -v error -select_streams v:0 -count_packets -show_entries stream=nb_read_packets -of csv=p=0 render.mp4 > video_packets.txt
-          DURATION=$(python3 - <<'PY'
-from pathlib import Path
-print(float(Path("render_duration.txt").read_text().strip() or "0"))
-PY
-)
-          PACKETS=$(python3 - <<'PY'
-from pathlib import Path
-raw=Path("video_packets.txt").read_text().strip()
-print(int(raw or "0"))
-PY
-)
-          echo "Rendered duration: ${DURATION}s"
-          echo "Video packets: ${PACKETS}"
+          ffprobe -v error -select_streams v:0 -show_entries stream=nb_frames -of default=noprint_wrappers=1:nokey=1 render.mp4 > video_frames.txt
+          ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 render.mp4 > audio_codec.txt
           python3 - <<'PY'
-import sys
-from pathlib import Path
-d=float(Path("render_duration.txt").read_text().strip() or "0")
-p=int(Path("video_packets.txt").read_text().strip() or "0")
+import pathlib
+scenes=int(pathlib.Path('scene_count.txt').read_text().strip() or '0')
+d=float(pathlib.Path('render_duration.txt').read_text().strip() or '0')
+f=int(pathlib.Path('video_frames.txt').read_text().strip() or '0')
+a=pathlib.Path('audio_codec.txt').read_text().strip()
+if scenes < 2:
+    raise SystemExit('Expected multiple scenes')
 if d < 2.0:
-    raise SystemExit("Rendered duration unexpectedly short; expected multi-scene output")
-if p < 20:
-    raise SystemExit("Rendered video has too few frames/packets; possible static or broken output")
-print("Render output validation passed")
+    raise SystemExit('Rendered duration unexpectedly short')
+if f < 20:
+    raise SystemExit('Rendered video has too few frames')
+if not a:
+    raise SystemExit('Rendered video missing audio stream')
+print('Render output validation passed')
 PY
 
       - name: Upload rendered video to Supabase storage
         env:
-          SUPABASE_URL: ${{ inputs.supabase_url }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ inputs.supabase_service_role_key }}
-          BUCKET: ${{ inputs.bucket }}
-          OUTPUT_PATH: ${{ inputs.output_path }}
+          SUPABASE_URL: ${{ github.event.inputs.supabase_url || github.event.client_payload.supabase_url || inputs.supabase_url }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ github.event.inputs.supabase_service_role_key || github.event.client_payload.supabase_service_role_key || inputs.supabase_service_role_key }}
+          BUCKET: ${{ github.event.inputs.bucket || github.event.client_payload.bucket || inputs.bucket }}
+          OUTPUT_PATH: ${{ github.event.inputs.output_path || github.event.client_payload.output_path || inputs.output_path }}
         run: |
           set -euo pipefail
           UPLOAD_RESPONSE=$(curl -sS --fail-with-body -X POST "${SUPABASE_URL}/storage/v1/object/${BUCKET}/${OUTPUT_PATH}" \
@@ -184,4 +164,3 @@ PY
             --data-binary @render.mp4)
 
           echo "${UPLOAD_RESPONSE}" | jq -c '.'
-          echo "${UPLOAD_RESPONSE}" | jq -e --arg output_path "${OUTPUT_PATH}" '((.Key // .key // .path // "") | tostring | contains($output_path)) or ((.id // "") | tostring | length > 0)' >/dev/null

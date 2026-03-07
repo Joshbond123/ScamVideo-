@@ -16,6 +16,7 @@ import {
 } from './services/videoService';
 import { postCommentToFacebook, postPhotoToFacebook, postVideoToFacebook, verifyFacebookObjectPublished } from './services/facebookService';
 import { getActiveKeys, resolveCloudflareAccountId } from './services/keyService';
+import { getKeyValueByTypeAndName } from './services/supabaseKeyStore';
 
 const SCHEDULER_TICK_MS = 15_000;
 const STALE_GENERATING_MS = 15 * 60 * 1000;
@@ -34,7 +35,7 @@ const STAGE_TIMEOUTS_MS: Record<string, number> = {
   video_scene_image_generation: 8 * 60_000,
   post_image_generation_with_overlay: 4 * 60_000,
   video_voiceover_generation: 4 * 60_000,
-  video_render_gstreamer: 20 * 60_000,
+  video_render_ffmpeg: 20 * 60_000,
   video_host_catbox: 3 * 60_000,
   post_host_catbox: 3 * 60_000,
   video_publish_facebook: 3 * 60_000,
@@ -159,8 +160,10 @@ async function validateRequiredConfig(schedule: Schedule) {
   if (!cloudflareAccountId) missing.push('cloudflare_account_id');
 
   if (schedule.type === 'video') {
-    if (!(process.env.GITHUB_PAT || process.env.RENDER_GITHUB_PAT)) missing.push('github_pat');
-    if (!(process.env.GITHUB_RENDER_REPO || process.env.RENDER_REPO)) missing.push('github_render_repo');
+    const githubPat = String(process.env.GITHUB_PAT || process.env.RENDER_GITHUB_PAT || (await getKeyValueByTypeAndName('config', 'GITHUB_PAT')) || '').trim();
+    const githubRenderRepo = String(process.env.GITHUB_RENDER_REPO || process.env.RENDER_REPO || (await getKeyValueByTypeAndName('config', 'GITHUB_RENDER_REPO')) || '').trim();
+    if (!githubPat) missing.push('github_pat');
+    if (!githubRenderRepo) missing.push('github_render_repo');
   }
 
   if (missing.length) throw new Error(`Missing required configuration: ${missing.join(', ')}`);
@@ -459,7 +462,7 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
       }
     });
 
-    const videoPath = await withStage(schedule, 'video_render_gstreamer', async () =>
+    const videoPath = await withStage(schedule, 'video_render_ffmpeg', async () =>
       assembleVideo(
         jobId,
         audioPath,
