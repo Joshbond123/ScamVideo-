@@ -353,7 +353,7 @@ export async function generatePostImageWithTitleOverlay(prompt: string, title: s
 }
 
 export async function assembleVideo(jobId: string, audioPath: string, imagePaths: string[], subtitleLines: string[]) {
-  console.info(`[render:${jobId}] render_provider=github_actions_gstreamer`);
+  console.info(`[render:${jobId}] render_provider=github_actions_ffmpeg`);
 
   const meta = voiceMetaByJob.get(jobId);
   if (!meta?.words?.length) {
@@ -377,7 +377,7 @@ export async function assembleVideo(jobId: string, audioPath: string, imagePaths
   });
 
   if (!remote?.localOutput) {
-    throw new Error(`[render:${jobId}] render_provider=github_actions_gstreamer failed: missing local output`);
+    throw new Error(`[render:${jobId}] render_provider=github_actions_ffmpeg failed: missing local output`);
   }
 
   console.info(`[render:${jobId}] subtitles_burn_step=success output=${remote.outputPath || remote.localOutput} workflow_run=${remote.runUrl || 'n/a'}`);
