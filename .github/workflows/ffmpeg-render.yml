@@ -90,30 +90,60 @@ jobs:
           for idx, p in enumerate(image_paths):
               dl(p, f'scene_{idx}.png')
 
-          def ts(v):
-              v = max(0.0, float(v))
-              h = int(v // 3600)
-              m = int((v % 3600) // 60)
-              s = int(v % 60)
-              ms = int(round((v - int(v)) * 1000))
-              return f"{h:02}:{m:02}:{s:02},{ms:03}"
 
           blocks = []
           for ev in subtitle_events:
               start = float(ev.get('start', 0) or 0)
               end = float(ev.get('end', 0) or 0)
-              if end <= start:
-                  end = start + 1.2
               txt = ' '.join(str(ev.get('text', '')).replace('\n', ' ').split())
               if txt:
                   blocks.append((start, end, txt))
 
-          if not blocks:
-              blocks = [(0.0, 2.0, 'Stay alert and avoid crypto scams')]
+          blocks.sort(key=lambda x: x[0])
+          normalized = []
+          cursor = 0.0
+          for start, end, txt in blocks:
+              start = max(0.0, start, cursor)
+              end = max(start + 0.05, end)
+              normalized.append((start, end, txt))
+              cursor = end
 
-          with open('subtitles.srt', 'w', encoding='utf-8', newline='\n') as f:
-              for i, (start, end, txt) in enumerate(blocks, 1):
-                  f.write(f"{i}\n{ts(start)} --> {ts(end)}\n{txt}\n\n")
+          if not normalized:
+              normalized = [(0.0, 2.0, 'Stay alert and avoid crypto scams')]
+
+          def ass_ts(v):
+              v = max(0.0, float(v))
+              h = int(v // 3600)
+              m = int((v % 3600) // 60)
+              s = int(v % 60)
+              cs_total = int(round((v - int(v)) * 100))
+              carry_s, cs = divmod(cs_total, 100)
+              s = s + carry_s
+              carry_m, s = divmod(s, 60)
+              m = m + carry_m
+              carry_h, m = divmod(m, 60)
+              h = h + carry_h
+              return f"{h}:{m:02}:{s:02}.{cs:02}"
+
+          ass_lines = [
+              '[Script Info]',
+              'ScriptType: v4.00+',
+              'PlayResX: 1080',
+              'PlayResY: 1920',
+              '',
+              '[V4+ Styles]',
+              'Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding',
+              'Style: Viral,Arial Black,26,&H00FFFF00,&H0000FFFF,&H00000000,&H64000000,1,0,0,0,100,100,0,0,3,2,0,2,60,60,180,1',
+              '',
+              '[Events]',
+              'Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text',
+          ]
+          for start, end, txt in normalized:
+              safe = txt.replace('{', '(').replace('}', ')')
+              ass_lines.append(f"Dialogue: 0,{ass_ts(start)},{ass_ts(end)},Viral,,0,0,0,,{safe}")
+
+          with open('subtitles.ass', 'w', encoding='utf-8', newline='\n') as f:
+              f.write('\n'.join(ass_lines) + '\n')
 
           scene_duration = voice_duration / len(image_paths)
           with open('images.txt', 'w', encoding='utf-8', newline='\n') as f:
@@ -126,13 +156,17 @@ jobs:
               f.write(str(len(image_paths)))
           PY
 
+      - name: Verify ffmpeg has libass subtitle support
+        run: |
+          ffmpeg -hide_banner -filters | grep -E '\b(subtitles|ass)\b'
+
       - name: Render MP4 with FFmpeg
         run: |
           set -euo pipefail
           ffmpeg -y -hide_banner -loglevel error \
             -f concat -safe 0 -i images.txt \
             -i audio.mp3 \
-            -vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,subtitles=subtitles.srt:force_style='FontName=Arial,FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV=120'" \
+            -vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,subtitles=subtitles.ass:charenc=UTF-8" \
             -r 30 -pix_fmt yuv420p \
             -c:v libx264 -preset medium -profile:v high -level 4.1 -movflags +faststart \
             -c:a aac -b:a 192k -ar 48000 -ac 2 \

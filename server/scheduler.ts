@@ -472,6 +472,7 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
     );
 
     const videoUrl = await withStage(schedule, 'video_host_catbox', async () => uploadToCatbox(videoPath));
+    await logEvent(schedule.type, 'info', `catbox_video_uploaded id=${schedule.id} url=${videoUrl}`, schedule.niche);
 
     await withStage(schedule, 'video_publish_facebook', async () => {
       const description = `${scriptData.caption}\n\n${scriptData.hashtags}`;
@@ -521,6 +522,7 @@ async function runPostPipeline(schedule: Schedule, topic: string) {
   );
 
   const imageUrl = await withStage(schedule, 'post_host_catbox', async () => uploadToCatbox(imgPath));
+  await logEvent(schedule.type, 'info', `catbox_image_uploaded id=${schedule.id} url=${imageUrl}`, schedule.niche);
   await withStage(schedule, 'post_cleanup_local_asset', async () => cleanupPostImageAsset(imgPath));
 
   await withStage(schedule, 'post_publish_facebook', async () => {
