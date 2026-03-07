@@ -1,4 +1,4 @@
-name: ffmpeg-render
+name: moviepy-render
 run-name: Render ${{ github.event.inputs.job_id || github.event.client_payload.job_id }}
 
 on:
@@ -47,12 +47,12 @@ jobs:
   render:
     runs-on: ubuntu-latest
     steps:
-      - name: Install deps
+      - name: Install Python deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg jq python3
+          python3 -m pip install --upgrade pip
+          python3 -m pip install moviepy pillow imageio imageio-ffmpeg numpy requests
 
-      - name: Download assets + build subtitle and concat manifests
+      - name: Download render assets and build subtitles.srt
         env:
           SUPABASE_URL: ${{ github.event.inputs.supabase_url || github.event.client_payload.supabase_url }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ github.event.inputs.supabase_service_role_key || github.event.client_payload.supabase_service_role_key }}
@@ -74,104 +74,142 @@ jobs:
           voice_duration = max(1.0, float(os.environ.get('VOICE_DURATION_SEC') or 1.0))
 
           if not image_paths:
-              raise SystemExit('image_paths_json must include at least one scene image')
+            raise SystemExit('image_paths_json must include at least one scene image')
 
           def dl(remote, local):
-              req = urllib.request.Request(
-                  f"{base}/storage/v1/object/{bucket}/{remote}",
-                  headers={"apikey": key, "Authorization": f"Bearer {key}"},
-              )
-              with urllib.request.urlopen(req, timeout=120) as r:
-                  data = r.read()
-              with open(local, 'wb') as f:
-                  f.write(data)
+            req = urllib.request.Request(
+              f"{base}/storage/v1/object/{bucket}/{remote}",
+              headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            )
+            with urllib.request.urlopen(req, timeout=180) as r:
+              data = r.read()
+            with open(local, 'wb') as f:
+              f.write(data)
 
           dl(audio_path, 'audio.mp3')
           for idx, p in enumerate(image_paths):
-              dl(p, f'scene_{idx}.png')
+            dl(p, f'scene_{idx}.png')
 
+          def srt_ts(v):
+            v = max(0.0, float(v))
+            h = int(v // 3600)
+            m = int((v % 3600) // 60)
+            s = int(v % 60)
+            ms = int(round((v - int(v)) * 1000))
+            if ms >= 1000:
+              s += 1
+              ms -= 1000
+            if s >= 60:
+              m += 1
+              s -= 60
+            if m >= 60:
+              h += 1
+              m -= 60
+            return f"{h:02}:{m:02}:{s:02},{ms:03}"
 
-          blocks = []
+          events = []
           for ev in subtitle_events:
-              start = float(ev.get('start', 0) or 0)
-              end = float(ev.get('end', 0) or 0)
-              txt = ' '.join(str(ev.get('text', '')).replace('\n', ' ').split())
-              if txt:
-                  blocks.append((start, end, txt))
+            start = float(ev.get('start', 0) or 0)
+            end = float(ev.get('end', 0) or 0)
+            txt = ' '.join(str(ev.get('text', '')).replace('\n', ' ').split())
+            if txt:
+              events.append((start, end, txt))
 
-          blocks.sort(key=lambda x: x[0])
+          events.sort(key=lambda x: x[0])
           normalized = []
           cursor = 0.0
-          for start, end, txt in blocks:
-              start = max(0.0, start, cursor)
-              end = max(start + 0.05, end)
-              normalized.append((start, end, txt))
-              cursor = end
+          for start, end, txt in events:
+            start = max(0.0, start, cursor)
+            end = max(start + 0.05, end)
+            normalized.append((start, end, txt))
+            cursor = end
 
           if not normalized:
-              normalized = [(0.0, 2.0, 'Stay alert and avoid crypto scams')]
+            normalized = [(0.0, min(voice_duration, 2.0), 'Stay alert and avoid crypto scams')]
 
-          def ass_ts(v):
-              v = max(0.0, float(v))
-              h = int(v // 3600)
-              m = int((v % 3600) // 60)
-              s = int(v % 60)
-              cs_total = int(round((v - int(v)) * 100))
-              carry_s, cs = divmod(cs_total, 100)
-              s = s + carry_s
-              carry_m, s = divmod(s, 60)
-              m = m + carry_m
-              carry_h, m = divmod(m, 60)
-              h = h + carry_h
-              return f"{h}:{m:02}:{s:02}.{cs:02}"
-
-          ass_lines = [
-              '[Script Info]',
-              'ScriptType: v4.00+',
-              'PlayResX: 1080',
-              'PlayResY: 1920',
-              '',
-              '[V4+ Styles]',
-              'Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding',
-              'Style: Viral,Arial Black,26,&H00FFFF00,&H0000FFFF,&H00000000,&H64000000,1,0,0,0,100,100,0,0,3,2,0,2,60,60,180,1',
-              '',
-              '[Events]',
-              'Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text',
-          ]
-          for start, end, txt in normalized:
-              safe = txt.replace('{', '(').replace('}', ')')
-              ass_lines.append(f"Dialogue: 0,{ass_ts(start)},{ass_ts(end)},Viral,,0,0,0,,{safe}")
-
-          with open('subtitles.ass', 'w', encoding='utf-8', newline='\n') as f:
-              f.write('\n'.join(ass_lines) + '\n')
-
-          scene_duration = voice_duration / len(image_paths)
-          with open('images.txt', 'w', encoding='utf-8', newline='\n') as f:
-              for idx in range(len(image_paths)):
-                  f.write(f"file '{os.path.abspath(f'scene_{idx}.png')}'\n")
-                  f.write(f"duration {scene_duration:.6f}\n")
-              f.write(f"file '{os.path.abspath(f'scene_{len(image_paths)-1}.png')}'\n")
+          with open('subtitles.srt', 'w', encoding='utf-8', newline='\n') as f:
+            for idx, (start, end, txt) in enumerate(normalized, start=1):
+              f.write(f"{idx}\n{srt_ts(start)} --> {srt_ts(end)}\n{txt}\n\n")
 
           with open('scene_count.txt', 'w', encoding='utf-8') as f:
-              f.write(str(len(image_paths)))
+            f.write(str(len(image_paths)))
+          with open('voice_duration_sec.txt', 'w', encoding='utf-8') as f:
+            f.write(str(voice_duration))
           PY
 
-      - name: Verify ffmpeg has libass subtitle support
+      - name: Render MP4 with MoviePy
         run: |
-          ffmpeg -hide_banner -filters | grep -E '\b(subtitles|ass)\b'
+          python3 - <<'PY'
+          import os
+          from PIL import Image
+          from moviepy import ImageSequenceClip, AudioFileClip, CompositeVideoClip, TextClip
+          from moviepy.video.tools.subtitles import SubtitlesClip
 
-      - name: Render MP4 with FFmpeg
+          W, H = 1080, 1920
+          FPS = 30
+
+          with open('scene_count.txt', 'r', encoding='utf-8') as f:
+            scene_count = int(f.read().strip())
+
+          image_paths = [f'scene_{i}.png' for i in range(scene_count)]
+          if not image_paths:
+            raise SystemExit('No images found for render')
+
+          audio = AudioFileClip('audio.mp3')
+          duration = max(1.0, float(audio.duration or 0.0))
+          scene_duration = duration / max(1, len(image_paths))
+
+          prepared = []
+          for i, p in enumerate(image_paths):
+            out = f'prepared_{i}.png'
+            with Image.open(p).convert('RGB') as img:
+              src_ratio = img.width / img.height
+              dst_ratio = W / H
+              if src_ratio > dst_ratio:
+                new_h = H
+                new_w = int(new_h * src_ratio)
+              else:
+                new_w = W
+                new_h = int(new_w / src_ratio)
+              resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+              left = (new_w - W) // 2
+              top = (new_h - H) // 2
+              cropped = resized.crop((left, top, left + W, top + H))
+              cropped.save(out, 'PNG')
+            prepared.append(out)
+
+          video = ImageSequenceClip(prepared, durations=[scene_duration] * len(prepared)).with_audio(audio).with_duration(duration)
+
+          def subtitle_generator(txt: str):
+            clean = (txt or '').strip()
+            if not clean:
+              clean = ' '
+            return TextClip(
+              text=clean,
+              font_size=56,
+              color='white',
+              stroke_color='black',
+              stroke_width=2,
+              method='caption',
+              size=(920, None)
+            ).with_position(('center', 0.78), relative=True)
+
+          subtitles = SubtitlesClip('subtitles.srt', subtitle_generator)
+          final = CompositeVideoClip([video, subtitles.with_duration(duration)], size=(W, H)).with_audio(audio)
+
+          final.write_videofile(
+            'render.mp4',
+            fps=FPS,
+            codec='libx264',
+            audio_codec='aac',
+            preset='medium',
+            threads=4,
+            ffmpeg_params=['-pix_fmt', 'yuv420p', '-movflags', '+faststart']
+          )
+          PY
+
+      - name: Validate output exists
         run: |
-          set -euo pipefail
-          ffmpeg -y -hide_banner -loglevel error \
-            -f concat -safe 0 -i images.txt \
-            -i audio.mp3 \
-            -vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,subtitles=subtitles.ass:charenc=UTF-8" \
-            -r 30 -pix_fmt yuv420p \
-            -c:v libx264 -preset medium -profile:v high -level 4.1 -movflags +faststart \
-            -c:a aac -b:a 192k -ar 48000 -ac 2 \
-            -shortest render.mp4
-
           test -s render.mp4
 
       - name: Upload rendered video to Supabase storage

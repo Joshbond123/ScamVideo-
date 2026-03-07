@@ -158,15 +158,6 @@ function chooseRandomVoice() {
   return UNREAL_VOICES[Math.floor(Math.random() * UNREAL_VOICES.length)];
 }
 
-function toAssTime(seconds: number) {
-  const total = Math.max(0, seconds);
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = Math.floor(total % 60);
-  const cs = Math.floor((total - Math.floor(total)) * 100);
-  return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
-}
-
 function buildSubtitleEventsFromWords(words: VoiceTimingWord[]) {
   const events: Array<{ text: string; start: number; end: number }> = [];
   let cursor = 0;
@@ -188,33 +179,6 @@ function buildSubtitleEventsFromWords(words: VoiceTimingWord[]) {
     cursor = end;
   }
   return events;
-}
-
-async function writeAssSubtitle(jobId: string, events: Array<{ text: string; start: number; end: number }>) {
-  const assPath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.ass`);
-  await fs.ensureDir(path.dirname(assPath));
-
-  const ass = [
-    '[Script Info]',
-    'ScriptType: v4.00+',
-    'PlayResX: 1080',
-    'PlayResY: 1920',
-    '',
-    '[V4+ Styles]',
-    'Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding',
-    'Style: Viral,Arial,58,&H00FFFFFF,&H0000FFFF,&H00332200,&H66000000,1,0,0,0,100,100,0,0,3,3,0,2,60,60,120,1',
-    '',
-    '[Events]',
-    'Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text',
-  ];
-
-  for (const ev of events) {
-    const safe = ev.text.replace(/,/g, '\\,').replace(/\{/g, '(').replace(/\}/g, ')');
-    ass.push(`Dialogue: 0,${toAssTime(ev.start)},${toAssTime(ev.end)},Viral,,0,0,0,,${safe}`);
-  }
-
-  await fs.writeFile(assPath, ass.join('\n'), 'utf8');
-  return assPath;
 }
 
 export async function generateVoiceover(text: string, jobId: string) {
@@ -366,7 +330,7 @@ export async function generatePostImageWithTitleOverlay(prompt: string, title: s
 }
 
 export async function assembleVideo(jobId: string, audioPath: string, imagePaths: string[], subtitleLines: string[]) {
-  console.info(`[render:${jobId}] render_provider=github_actions_ffmpeg`);
+  console.info(`[render:${jobId}] render_provider=github_actions_moviepy`);
 
   const meta = voiceMetaByJob.get(jobId);
   if (!meta?.words?.length) {
@@ -374,8 +338,7 @@ export async function assembleVideo(jobId: string, audioPath: string, imagePaths
   }
 
   const subtitleEvents = buildSubtitleEventsFromWords(meta.words);
-  const subtitleAssPath = await writeAssSubtitle(jobId, subtitleEvents);
-  console.info(`[render:${jobId}] subtitle_file=${subtitleAssPath} subtitle_events=${subtitleEvents.length}`);
+  console.info(`[render:${jobId}] subtitle_format=srt subtitle_events=${subtitleEvents.length}`);
 
   const remote = await renderVideoViaGitHubActions({
     jobId,
@@ -390,7 +353,7 @@ export async function assembleVideo(jobId: string, audioPath: string, imagePaths
   });
 
   if (!remote?.localOutput) {
-    throw new Error(`[render:${jobId}] render_provider=github_actions_ffmpeg failed: missing local output`);
+    throw new Error(`[render:${jobId}] render_provider=github_actions_moviepy failed: missing local output`);
   }
 
   console.info(`[render:${jobId}] subtitles_burn_step=success output=${remote.outputPath || remote.localOutput} workflow_run=${remote.runUrl || 'n/a'}`);
@@ -430,7 +393,7 @@ export async function cleanupJobAssets(jobId: string) {
   const audioPath = path.join(process.cwd(), 'database/assets/audio', `${jobId}.mp3`);
   const imageDir = path.join(process.cwd(), 'database/assets/images', jobId);
   const videoPath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.mp4`);
-  const subtitlePath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.ass`);
+  const subtitlePath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.srt`);
   await Promise.all([fs.remove(audioPath), fs.remove(imageDir), fs.remove(videoPath), fs.remove(subtitlePath)]);
   voiceMetaByJob.delete(jobId);
 
@@ -438,7 +401,7 @@ export async function cleanupJobAssets(jobId: string) {
     await deleteSupabaseAssets([
       `jobs/${jobId}/audio.mp3`,
       `jobs/${jobId}/render.mp4`,
-      `jobs/${jobId}/subtitles.ass`,
+      `jobs/${jobId}/subtitles.srt`,
       ...Array.from({ length: 16 }).map((_, idx) => `jobs/${jobId}/scene_${idx}.png`),
     ]);
   } catch (error) {
