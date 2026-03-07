@@ -364,29 +364,36 @@ export async function uploadToCatbox(filePath: string) {
   const hash = await readJson<any>(PATHS.settings).then((s) => s?.catboxHash);
   if (!hash) throw new Error('Catbox hash not configured');
 
-  const form = new FormData();
-  form.append('reqtype', 'fileupload');
-  form.append('userhash', hash);
-  form.append('fileToUpload', fs.createReadStream(filePath));
+  let lastPayload = '';
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const form = new FormData();
+    form.append('reqtype', 'fileupload');
+    form.append('userhash', hash);
+    form.append('fileToUpload', fs.createReadStream(filePath));
 
-  const response = await axios.post('https://catbox.moe/user/api.php', form, {
-    headers: form.getHeaders(),
-    timeout: 120_000,
-    maxBodyLength: Infinity,
-    maxContentLength: Infinity,
-  });
+    const response = await axios.post('https://catbox.moe/user/api.php', form, {
+      headers: form.getHeaders(),
+      timeout: 120_000,
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+    });
 
-  const raw = String(response.data ?? '').trim();
-  const match = raw.match(/https?:\/\/[^\s]+/i);
-  const candidate = (match?.[0] || raw).trim();
+    const raw = String(response.data ?? '').trim();
+    lastPayload = raw;
+    const match = raw.match(/https?:\/\/[^\s]+/i);
+    const candidate = (match?.[0] || raw).trim();
 
-  try {
-    const parsed = new URL(candidate);
-    if (!/^https?:$/.test(parsed.protocol)) throw new Error('unsupported protocol');
-    return parsed.toString();
-  } catch {
-    throw new Error(`Catbox upload did not return a valid URL. payload=${raw.slice(0, 500)}`);
+    try {
+      const parsed = new URL(candidate);
+      if (!/^https?:$/.test(parsed.protocol)) throw new Error('unsupported protocol');
+      return parsed.toString();
+    } catch {
+      if (attempt >= 3) break;
+      await new Promise((resolve) => setTimeout(resolve, 1200 * attempt));
+    }
   }
+
+  throw new Error(`Catbox upload did not return a valid URL. payload=${lastPayload.slice(0, 500)}`);
 }
 
 export async function cleanupJobAssets(jobId: string) {
