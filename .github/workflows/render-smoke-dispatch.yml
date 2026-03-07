@@ -1,0 +1,20 @@
+name: render-smoke-dispatch
+run-name: Smoke Render ${{ github.event.inputs.job_id || github.event.client_payload.job_id || 'n/a' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        required: true
+        type: string
+  repository_dispatch:
+    types: [render_video]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show trigger context
+        run: |
+          echo "event=${{ github.event_name }}"
+          echo "job_id=${{ github.event.inputs.job_id || github.event.client_payload.job_id }}"
