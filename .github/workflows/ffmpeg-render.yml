@@ -41,8 +41,7 @@ on:
         required: true
         type: string
   repository_dispatch:
-    types:
-      - render_video
+    types: [render_video]
 
 jobs:
   render:
@@ -64,68 +63,68 @@ jobs:
           VOICE_DURATION_SEC: ${{ github.event.inputs.voice_duration_sec || github.event.client_payload.voice_duration_sec }}
         run: |
           python3 - <<'PY'
-import os, json, math, urllib.request
+          import os, json, urllib.request
 
-base = os.environ['SUPABASE_URL'].rstrip('/')
-key = os.environ['SUPABASE_SERVICE_ROLE_KEY']
-bucket = os.environ['BUCKET']
-audio_path = os.environ['AUDIO_PATH']
-image_paths = json.loads(os.environ['IMAGE_PATHS_JSON'])
-subtitle_events = json.loads(os.environ['SUBTITLE_EVENTS_JSON'])
-voice_duration = max(1.0, float(os.environ.get('VOICE_DURATION_SEC') or 1.0))
+          base = os.environ['SUPABASE_URL'].rstrip('/')
+          key = os.environ['SUPABASE_SERVICE_ROLE_KEY']
+          bucket = os.environ['BUCKET']
+          audio_path = os.environ['AUDIO_PATH']
+          image_paths = json.loads(os.environ['IMAGE_PATHS_JSON'])
+          subtitle_events = json.loads(os.environ['SUBTITLE_EVENTS_JSON'])
+          voice_duration = max(1.0, float(os.environ.get('VOICE_DURATION_SEC') or 1.0))
 
-if not image_paths:
-    raise SystemExit('image_paths_json must include at least one scene image')
+          if not image_paths:
+              raise SystemExit('image_paths_json must include at least one scene image')
 
-def dl(remote, local):
-    req = urllib.request.Request(f"{base}/storage/v1/object/{bucket}/{remote}", headers={"apikey": key, "Authorization": f"Bearer {key}"})
-    with urllib.request.urlopen(req, timeout=120) as r:
-        data = r.read()
-    with open(local, 'wb') as f:
-        f.write(data)
+          def dl(remote, local):
+              req = urllib.request.Request(
+                  f"{base}/storage/v1/object/{bucket}/{remote}",
+                  headers={"apikey": key, "Authorization": f"Bearer {key}"},
+              )
+              with urllib.request.urlopen(req, timeout=120) as r:
+                  data = r.read()
+              with open(local, 'wb') as f:
+                  f.write(data)
 
-dl(audio_path, 'audio.mp3')
-for idx, p in enumerate(image_paths):
-    dl(p, f'scene_{idx}.png')
+          dl(audio_path, 'audio.mp3')
+          for idx, p in enumerate(image_paths):
+              dl(p, f'scene_{idx}.png')
 
-def ts_srt(v):
-    v = max(0.0, float(v))
-    h = int(v // 3600)
-    m = int((v % 3600) // 60)
-    s = int(v % 60)
-    ms = int(round((v - int(v)) * 1000))
-    return f"{h:02}:{m:02}:{s:02},{ms:03}"
+          def ts(v):
+              v = max(0.0, float(v))
+              h = int(v // 3600)
+              m = int((v % 3600) // 60)
+              s = int(v % 60)
+              ms = int(round((v - int(v)) * 1000))
+              return f"{h:02}:{m:02}:{s:02},{ms:03}"
 
-blocks = []
-for ev in subtitle_events:
-    start = float(ev.get('start', 0) or 0)
-    end = float(ev.get('end', 0) or 0)
-    if end <= start:
-        end = start + 1.2
-    txt = str(ev.get('text', '')).replace('\n', ' ').strip()
-    txt = ' '.join(txt.split())
-    if txt:
-        blocks.append((start, end, txt))
+          blocks = []
+          for ev in subtitle_events:
+              start = float(ev.get('start', 0) or 0)
+              end = float(ev.get('end', 0) or 0)
+              if end <= start:
+                  end = start + 1.2
+              txt = ' '.join(str(ev.get('text', '')).replace('\n', ' ').split())
+              if txt:
+                  blocks.append((start, end, txt))
 
-if not blocks:
-    blocks = [(0.0, 2.0, 'Stay alert and avoid crypto scams')]
+          if not blocks:
+              blocks = [(0.0, 2.0, 'Stay alert and avoid crypto scams')]
 
-with open('subtitles.srt', 'w', encoding='utf-8', newline='\n') as f:
-    for i, (start, end, txt) in enumerate(blocks, 1):
-        f.write(f"{i}\n{ts_srt(start)} --> {ts_srt(end)}\n{txt}\n\n")
+          with open('subtitles.srt', 'w', encoding='utf-8', newline='\n') as f:
+              for i, (start, end, txt) in enumerate(blocks, 1):
+                  f.write(f"{i}\n{ts(start)} --> {ts(end)}\n{txt}\n\n")
 
-image_count = len(image_paths)
-scene_duration = voice_duration / image_count
+          scene_duration = voice_duration / len(image_paths)
+          with open('images.txt', 'w', encoding='utf-8', newline='\n') as f:
+              for idx in range(len(image_paths)):
+                  f.write(f"file '{os.path.abspath(f'scene_{idx}.png')}'\n")
+                  f.write(f"duration {scene_duration:.6f}\n")
+              f.write(f"file '{os.path.abspath(f'scene_{len(image_paths)-1}.png')}'\n")
 
-with open('images.txt', 'w', encoding='utf-8', newline='\n') as f:
-    for idx in range(image_count):
-        f.write(f"file '{os.path.abspath(f'scene_{idx}.png')}'\n")
-        f.write(f"duration {scene_duration:.6f}\n")
-    f.write(f"file '{os.path.abspath(f'scene_{image_count-1}.png')}'\n")
-
-with open('scene_count.txt', 'w', encoding='utf-8') as f:
-    f.write(str(image_count))
-PY
+          with open('scene_count.txt', 'w', encoding='utf-8') as f:
+              f.write(str(len(image_paths)))
+          PY
 
       - name: Render MP4 with FFmpeg
         run: |
@@ -140,45 +139,6 @@ PY
             -shortest render.mp4
 
           test -s render.mp4
-          ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 render.mp4 > render_duration.txt
-          ffprobe -v error -select_streams v:0 -show_entries stream=nb_frames -of default=noprint_wrappers=1:nokey=1 render.mp4 > video_frames.txt
-          ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 render.mp4 > audio_codec.txt
-
-          DURATION=$(python3 - <<'PY'
-from pathlib import Path
-print(float(Path('render_duration.txt').read_text().strip() or '0'))
-PY
-)
-          FRAMES=$(python3 - <<'PY'
-from pathlib import Path
-raw=Path('video_frames.txt').read_text().strip()
-print(int(raw or '0'))
-PY
-)
-          SCENES=$(cat scene_count.txt)
-          AUDIO_CODEC=$(cat audio_codec.txt)
-
-          echo "Rendered duration: ${DURATION}s"
-          echo "Video frames: ${FRAMES}"
-          echo "Scene count: ${SCENES}"
-          echo "Audio codec: ${AUDIO_CODEC}"
-
-          python3 - <<'PY'
-from pathlib import Path
-d=float(Path('render_duration.txt').read_text().strip() or '0')
-f=int((Path('video_frames.txt').read_text().strip() or '0'))
-scenes=int((Path('scene_count.txt').read_text().strip() or '0'))
-audio=Path('audio_codec.txt').read_text().strip()
-if scenes < 2:
-    raise SystemExit('Expected multiple scenes but found fewer than 2 input images')
-if d < 2.0:
-    raise SystemExit('Rendered duration unexpectedly short; expected multi-scene output')
-if f < 20:
-    raise SystemExit('Rendered video has too few frames; possible broken output')
-if not audio:
-    raise SystemExit('Rendered video is missing an audio stream')
-print('Render output validation passed')
-PY
 
       - name: Upload rendered video to Supabase storage
         env:

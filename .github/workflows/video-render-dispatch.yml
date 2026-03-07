@@ -1,108 +1,130 @@
-name: video-render-dispatch
-run-name: Render ${{ github.event.client_payload.job_id || inputs.job_id }}
+name: ffmpeg-render
+run-name: Render ${{ github.event.inputs.job_id || github.event.client_payload.job_id }}
 
 on:
-  repository_dispatch:
-    types: [render_video]
   workflow_dispatch:
     inputs:
       job_id:
+        description: Render job id
         required: true
         type: string
       supabase_url:
+        description: Supabase project URL
         required: true
         type: string
       supabase_service_role_key:
+        description: Supabase service role key
         required: true
         type: string
       bucket:
+        description: Supabase storage bucket
         required: true
         type: string
       audio_path:
+        description: Audio object path
         required: true
         type: string
       image_paths_json:
+        description: JSON array of image object paths
         required: true
         type: string
       subtitle_events_json:
+        description: JSON subtitle events
         required: true
         type: string
       output_path:
+        description: Output object path
         required: true
         type: string
       voice_duration_sec:
+        description: Voice duration in seconds
         required: true
         type: string
+  repository_dispatch:
+    types: [render_video]
 
 jobs:
   render:
     runs-on: ubuntu-latest
-    env:
-      JOB_ID: ${{ github.event.client_payload.job_id || inputs.job_id }}
-      SUPABASE_URL: ${{ github.event.client_payload.supabase_url || inputs.supabase_url }}
-      SUPABASE_SERVICE_ROLE_KEY: ${{ github.event.client_payload.supabase_service_role_key || inputs.supabase_service_role_key }}
-      BUCKET: ${{ github.event.client_payload.bucket || inputs.bucket }}
-      AUDIO_PATH: ${{ github.event.client_payload.audio_path || inputs.audio_path }}
-      IMAGE_PATHS_JSON: ${{ github.event.client_payload.image_paths_json || inputs.image_paths_json }}
-      SUBTITLE_EVENTS_JSON: ${{ github.event.client_payload.subtitle_events_json || inputs.subtitle_events_json }}
-      OUTPUT_PATH: ${{ github.event.client_payload.output_path || inputs.output_path }}
-      VOICE_DURATION_SEC: ${{ github.event.client_payload.voice_duration_sec || inputs.voice_duration_sec }}
     steps:
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg python3
+          sudo apt-get install -y ffmpeg jq python3
 
-      - name: Download assets + prepare manifests
+      - name: Download assets + build subtitle and concat manifests
+        env:
+          SUPABASE_URL: ${{ github.event.inputs.supabase_url || github.event.client_payload.supabase_url }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ github.event.inputs.supabase_service_role_key || github.event.client_payload.supabase_service_role_key }}
+          BUCKET: ${{ github.event.inputs.bucket || github.event.client_payload.bucket }}
+          AUDIO_PATH: ${{ github.event.inputs.audio_path || github.event.client_payload.audio_path }}
+          IMAGE_PATHS_JSON: ${{ github.event.inputs.image_paths_json || github.event.client_payload.image_paths_json }}
+          SUBTITLE_EVENTS_JSON: ${{ github.event.inputs.subtitle_events_json || github.event.client_payload.subtitle_events_json }}
+          VOICE_DURATION_SEC: ${{ github.event.inputs.voice_duration_sec || github.event.client_payload.voice_duration_sec }}
         run: |
           python3 - <<'PY'
-import os, json, urllib.request
-base = os.environ['SUPABASE_URL'].rstrip('/')
-key = os.environ['SUPABASE_SERVICE_ROLE_KEY']
-bucket = os.environ['BUCKET']
-audio_path = os.environ['AUDIO_PATH']
-image_paths = json.loads(os.environ['IMAGE_PATHS_JSON'])
-subtitle_events = json.loads(os.environ['SUBTITLE_EVENTS_JSON'])
-voice_duration = max(1.0, float(os.environ.get('VOICE_DURATION_SEC') or 1.0))
-if not image_paths:
-    raise SystemExit('No scene images provided')
+          import os, json, urllib.request
 
-def dl(remote, local):
-    req = urllib.request.Request(f"{base}/storage/v1/object/{bucket}/{remote}", headers={"apikey": key, "Authorization": f"Bearer {key}"})
-    with urllib.request.urlopen(req, timeout=120) as r:
-        data = r.read()
-    with open(local, 'wb') as f:
-        f.write(data)
+          base = os.environ['SUPABASE_URL'].rstrip('/')
+          key = os.environ['SUPABASE_SERVICE_ROLE_KEY']
+          bucket = os.environ['BUCKET']
+          audio_path = os.environ['AUDIO_PATH']
+          image_paths = json.loads(os.environ['IMAGE_PATHS_JSON'])
+          subtitle_events = json.loads(os.environ['SUBTITLE_EVENTS_JSON'])
+          voice_duration = max(1.0, float(os.environ.get('VOICE_DURATION_SEC') or 1.0))
 
-dl(audio_path, 'audio.mp3')
-for i, p in enumerate(image_paths):
-    dl(p, f'scene_{i}.png')
+          if not image_paths:
+              raise SystemExit('image_paths_json must include at least one scene image')
 
-def ts(v):
-    v=max(0.0,float(v)); h=int(v//3600); m=int((v%3600)//60); s=int(v%60); ms=int(round((v-int(v))*1000))
-    return f"{h:02}:{m:02}:{s:02},{ms:03}"
+          def dl(remote, local):
+              req = urllib.request.Request(
+                  f"{base}/storage/v1/object/{bucket}/{remote}",
+                  headers={"apikey": key, "Authorization": f"Bearer {key}"},
+              )
+              with urllib.request.urlopen(req, timeout=120) as r:
+                  data = r.read()
+              with open(local, 'wb') as f:
+                  f.write(data)
 
-with open('subtitles.srt', 'w', encoding='utf-8', newline='\n') as f:
-    n=0
-    for ev in subtitle_events:
-        txt=' '.join(str(ev.get('text','')).replace('\n',' ').split())
-        if not txt:
-            continue
-        start=float(ev.get('start',0) or 0)
-        end=float(ev.get('end',0) or 0)
-        if end<=start: end=start+1.2
-        n+=1
-        f.write(f"{n}\n{ts(start)} --> {ts(end)}\n{txt}\n\n")
-    if n==0:
-        f.write(f"1\n{ts(0)} --> {ts(2)}\nStay alert and avoid crypto scams\n\n")
+          dl(audio_path, 'audio.mp3')
+          for idx, p in enumerate(image_paths):
+              dl(p, f'scene_{idx}.png')
 
-scene_duration = voice_duration / len(image_paths)
-with open('images.txt','w',encoding='utf-8',newline='\n') as f:
-    for i in range(len(image_paths)):
-        f.write(f"file '{os.path.abspath(f'scene_{i}.png')}'\n")
-        f.write(f"duration {scene_duration:.6f}\n")
-    f.write(f"file '{os.path.abspath(f'scene_{len(image_paths)-1}.png')}'\n")
-PY
+          def ts(v):
+              v = max(0.0, float(v))
+              h = int(v // 3600)
+              m = int((v % 3600) // 60)
+              s = int(v % 60)
+              ms = int(round((v - int(v)) * 1000))
+              return f"{h:02}:{m:02}:{s:02},{ms:03}"
+
+          blocks = []
+          for ev in subtitle_events:
+              start = float(ev.get('start', 0) or 0)
+              end = float(ev.get('end', 0) or 0)
+              if end <= start:
+                  end = start + 1.2
+              txt = ' '.join(str(ev.get('text', '')).replace('\n', ' ').split())
+              if txt:
+                  blocks.append((start, end, txt))
+
+          if not blocks:
+              blocks = [(0.0, 2.0, 'Stay alert and avoid crypto scams')]
+
+          with open('subtitles.srt', 'w', encoding='utf-8', newline='\n') as f:
+              for i, (start, end, txt) in enumerate(blocks, 1):
+                  f.write(f"{i}\n{ts(start)} --> {ts(end)}\n{txt}\n\n")
+
+          scene_duration = voice_duration / len(image_paths)
+          with open('images.txt', 'w', encoding='utf-8', newline='\n') as f:
+              for idx in range(len(image_paths)):
+                  f.write(f"file '{os.path.abspath(f'scene_{idx}.png')}'\n")
+                  f.write(f"duration {scene_duration:.6f}\n")
+              f.write(f"file '{os.path.abspath(f'scene_{len(image_paths)-1}.png')}'\n")
+
+          with open('scene_count.txt', 'w', encoding='utf-8') as f:
+              f.write(str(len(image_paths)))
+          PY
 
       - name: Render MP4 with FFmpeg
         run: |
@@ -111,11 +133,19 @@ PY
             -f concat -safe 0 -i images.txt \
             -i audio.mp3 \
             -vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,subtitles=subtitles.srt:force_style='FontName=Arial,FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV=120'" \
-            -r 30 -pix_fmt yuv420p -c:v libx264 -preset medium -movflags +faststart \
-            -c:a aac -b:a 192k -ar 48000 -ac 2 -shortest render.mp4
+            -r 30 -pix_fmt yuv420p \
+            -c:v libx264 -preset medium -profile:v high -level 4.1 -movflags +faststart \
+            -c:a aac -b:a 192k -ar 48000 -ac 2 \
+            -shortest render.mp4
+
           test -s render.mp4
 
       - name: Upload rendered video to Supabase storage
+        env:
+          SUPABASE_URL: ${{ github.event.inputs.supabase_url || github.event.client_payload.supabase_url }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ github.event.inputs.supabase_service_role_key || github.event.client_payload.supabase_service_role_key }}
+          BUCKET: ${{ github.event.inputs.bucket || github.event.client_payload.bucket }}
+          OUTPUT_PATH: ${{ github.event.inputs.output_path || github.event.client_payload.output_path }}
         run: |
           curl -sS --fail-with-body -X POST "${SUPABASE_URL}/storage/v1/object/${BUCKET}/${OUTPUT_PATH}" \
             -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \

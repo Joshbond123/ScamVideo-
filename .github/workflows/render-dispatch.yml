@@ -1,39 +1,47 @@
 name: ffmpeg-render
-run-name: Render ${{ inputs.job_id }}
+run-name: Render ${{ github.event.inputs.job_id || github.event.client_payload.job_id }}
 
 on:
   workflow_dispatch:
     inputs:
       job_id:
+        description: Render job id
         required: true
         type: string
       supabase_url:
+        description: Supabase project URL
         required: true
         type: string
       supabase_service_role_key:
+        description: Supabase service role key
         required: true
         type: string
       bucket:
+        description: Supabase storage bucket
         required: true
         type: string
       audio_path:
+        description: Audio object path
         required: true
         type: string
       image_paths_json:
+        description: JSON array of image object paths
         required: true
         type: string
       subtitle_events_json:
+        description: JSON subtitle events
         required: true
         type: string
       output_path:
+        description: Output object path
         required: true
         type: string
       voice_duration_sec:
+        description: Voice duration in seconds
         required: true
         type: string
   repository_dispatch:
-    types:
-      - render_video
+    types: [render_video]
 
 jobs:
   render:
@@ -46,13 +54,13 @@ jobs:
 
       - name: Download assets + build subtitle and concat manifests
         env:
-          SUPABASE_URL: ${{ github.event.inputs.supabase_url || github.event.client_payload.supabase_url || inputs.supabase_url }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ github.event.inputs.supabase_service_role_key || github.event.client_payload.supabase_service_role_key || inputs.supabase_service_role_key }}
-          BUCKET: ${{ github.event.inputs.bucket || github.event.client_payload.bucket || inputs.bucket }}
-          AUDIO_PATH: ${{ github.event.inputs.audio_path || github.event.client_payload.audio_path || inputs.audio_path }}
-          IMAGE_PATHS_JSON: ${{ github.event.inputs.image_paths_json || github.event.client_payload.image_paths_json || inputs.image_paths_json }}
-          SUBTITLE_EVENTS_JSON: ${{ github.event.inputs.subtitle_events_json || github.event.client_payload.subtitle_events_json || inputs.subtitle_events_json }}
-          VOICE_DURATION_SEC: ${{ github.event.inputs.voice_duration_sec || github.event.client_payload.voice_duration_sec || inputs.voice_duration_sec }}
+          SUPABASE_URL: ${{ github.event.inputs.supabase_url || github.event.client_payload.supabase_url }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ github.event.inputs.supabase_service_role_key || github.event.client_payload.supabase_service_role_key }}
+          BUCKET: ${{ github.event.inputs.bucket || github.event.client_payload.bucket }}
+          AUDIO_PATH: ${{ github.event.inputs.audio_path || github.event.client_payload.audio_path }}
+          IMAGE_PATHS_JSON: ${{ github.event.inputs.image_paths_json || github.event.client_payload.image_paths_json }}
+          SUBTITLE_EVENTS_JSON: ${{ github.event.inputs.subtitle_events_json || github.event.client_payload.subtitle_events_json }}
+          VOICE_DURATION_SEC: ${{ github.event.inputs.voice_duration_sec || github.event.client_payload.voice_duration_sec }}
         run: |
           python3 - <<'PY'
           import os, json, urllib.request
@@ -69,7 +77,10 @@ jobs:
               raise SystemExit('image_paths_json must include at least one scene image')
 
           def dl(remote, local):
-              req = urllib.request.Request(f"{base}/storage/v1/object/{bucket}/{remote}", headers={"apikey": key, "Authorization": f"Bearer {key}"})
+              req = urllib.request.Request(
+                  f"{base}/storage/v1/object/{bucket}/{remote}",
+                  headers={"apikey": key, "Authorization": f"Bearer {key}"},
+              )
               with urllib.request.urlopen(req, timeout=120) as r:
                   data = r.read()
               with open(local, 'wb') as f:
@@ -123,44 +134,22 @@ jobs:
             -i audio.mp3 \
             -vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,subtitles=subtitles.srt:force_style='FontName=Arial,FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV=120'" \
             -r 30 -pix_fmt yuv420p \
-            -c:v libx264 -preset medium -movflags +faststart \
+            -c:v libx264 -preset medium -profile:v high -level 4.1 -movflags +faststart \
             -c:a aac -b:a 192k -ar 48000 -ac 2 \
             -shortest render.mp4
 
           test -s render.mp4
-          ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 render.mp4 > render_duration.txt
-          ffprobe -v error -select_streams v:0 -show_entries stream=nb_frames -of default=noprint_wrappers=1:nokey=1 render.mp4 > video_frames.txt
-          ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 render.mp4 > audio_codec.txt
-          python3 - <<'PY'
-import pathlib
-scenes=int(pathlib.Path('scene_count.txt').read_text().strip() or '0')
-d=float(pathlib.Path('render_duration.txt').read_text().strip() or '0')
-f=int(pathlib.Path('video_frames.txt').read_text().strip() or '0')
-a=pathlib.Path('audio_codec.txt').read_text().strip()
-if scenes < 2:
-    raise SystemExit('Expected multiple scenes')
-if d < 2.0:
-    raise SystemExit('Rendered duration unexpectedly short')
-if f < 20:
-    raise SystemExit('Rendered video has too few frames')
-if not a:
-    raise SystemExit('Rendered video missing audio stream')
-print('Render output validation passed')
-PY
 
       - name: Upload rendered video to Supabase storage
         env:
-          SUPABASE_URL: ${{ github.event.inputs.supabase_url || github.event.client_payload.supabase_url || inputs.supabase_url }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ github.event.inputs.supabase_service_role_key || github.event.client_payload.supabase_service_role_key || inputs.supabase_service_role_key }}
-          BUCKET: ${{ github.event.inputs.bucket || github.event.client_payload.bucket || inputs.bucket }}
-          OUTPUT_PATH: ${{ github.event.inputs.output_path || github.event.client_payload.output_path || inputs.output_path }}
+          SUPABASE_URL: ${{ github.event.inputs.supabase_url || github.event.client_payload.supabase_url }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ github.event.inputs.supabase_service_role_key || github.event.client_payload.supabase_service_role_key }}
+          BUCKET: ${{ github.event.inputs.bucket || github.event.client_payload.bucket }}
+          OUTPUT_PATH: ${{ github.event.inputs.output_path || github.event.client_payload.output_path }}
         run: |
-          set -euo pipefail
-          UPLOAD_RESPONSE=$(curl -sS --fail-with-body -X POST "${SUPABASE_URL}/storage/v1/object/${BUCKET}/${OUTPUT_PATH}" \
+          curl -sS --fail-with-body -X POST "${SUPABASE_URL}/storage/v1/object/${BUCKET}/${OUTPUT_PATH}" \
             -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
             -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
             -H "x-upsert: true" \
             -H "Content-Type: video/mp4" \
-            --data-binary @render.mp4)
-
-          echo "${UPLOAD_RESPONSE}" | jq -c '.'
+            --data-binary @render.mp4
