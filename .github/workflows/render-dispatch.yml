@@ -47,14 +47,12 @@ jobs:
   render:
     runs-on: ubuntu-latest
     steps:
-      - name: Install MoviePy deps
+      - name: Install Python deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg jq python3 python3-pip fonts-dejavu-core
           python3 -m pip install --upgrade pip
-          python3 -m pip install moviepy==2.1.2 pillow
+          python3 -m pip install moviepy pillow imageio imageio-ffmpeg numpy requests
 
-      - name: Download assets + generate subtitles.srt + render with MoviePy
+      - name: Download render assets and build subtitles.srt
         env:
           SUPABASE_URL: ${{ github.event.inputs.supabase_url || github.event.client_payload.supabase_url }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ github.event.inputs.supabase_service_role_key || github.event.client_payload.supabase_service_role_key }}
@@ -65,12 +63,7 @@ jobs:
           VOICE_DURATION_SEC: ${{ github.event.inputs.voice_duration_sec || github.event.client_payload.voice_duration_sec }}
         run: |
           python3 - <<'PY'
-          import json
-          import os
-          import urllib.request
-
-          from moviepy import AudioFileClip, ColorClip, CompositeVideoClip, ImageSequenceClip, TextClip
-          from moviepy.video.tools.subtitles import SubtitlesClip
+          import os, json, urllib.request
 
           base = os.environ['SUPABASE_URL'].rstrip('/')
           key = os.environ['SUPABASE_SERVICE_ROLE_KEY']
@@ -81,107 +74,144 @@ jobs:
           voice_duration = max(1.0, float(os.environ.get('VOICE_DURATION_SEC') or 1.0))
 
           if not image_paths:
-              raise SystemExit('image_paths_json must include at least one scene image')
+            raise SystemExit('image_paths_json must include at least one scene image')
 
-          def dl(remote: str, local: str):
-              req = urllib.request.Request(
-                  f"{base}/storage/v1/object/{bucket}/{remote}",
-                  headers={"apikey": key, "Authorization": f"Bearer {key}"},
-              )
-              with urllib.request.urlopen(req, timeout=120) as r:
-                  data = r.read()
-              with open(local, 'wb') as f:
-                  f.write(data)
+          def dl(remote, local):
+            req = urllib.request.Request(
+              f"{base}/storage/v1/object/{bucket}/{remote}",
+              headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            )
+            with urllib.request.urlopen(req, timeout=180) as r:
+              data = r.read()
+            with open(local, 'wb') as f:
+              f.write(data)
 
           dl(audio_path, 'audio.mp3')
-          image_locals = []
           for idx, p in enumerate(image_paths):
-              local = f'scene_{idx}.png'
-              dl(p, local)
-              image_locals.append(os.path.abspath(local))
+            dl(p, f'scene_{idx}.png')
 
-          blocks = []
+          def srt_ts(v):
+            v = max(0.0, float(v))
+            h = int(v // 3600)
+            m = int((v % 3600) // 60)
+            s = int(v % 60)
+            ms = int(round((v - int(v)) * 1000))
+            if ms >= 1000:
+              s += 1
+              ms -= 1000
+            if s >= 60:
+              m += 1
+              s -= 60
+            if m >= 60:
+              h += 1
+              m -= 60
+            return f"{h:02}:{m:02}:{s:02},{ms:03}"
+
+          events = []
           for ev in subtitle_events:
-              start = float(ev.get('start', 0) or 0)
-              end = float(ev.get('end', 0) or 0)
-              text = ' '.join(str(ev.get('text', '')).replace('\n', ' ').split())
-              if text:
-                  blocks.append((start, end, text))
+            start = float(ev.get('start', 0) or 0)
+            end = float(ev.get('end', 0) or 0)
+            txt = ' '.join(str(ev.get('text', '')).replace('\n', ' ').split())
+            if txt:
+              events.append((start, end, txt))
 
-          blocks.sort(key=lambda x: x[0])
+          events.sort(key=lambda x: x[0])
           normalized = []
           cursor = 0.0
-          for start, end, text in blocks:
-              start = max(0.0, start, cursor)
-              end = max(start + 0.05, end)
-              normalized.append((start, end, text))
-              cursor = end
+          for start, end, txt in events:
+            start = max(0.0, start, cursor)
+            end = max(start + 0.05, end)
+            normalized.append((start, end, txt))
+            cursor = end
 
           if not normalized:
-              normalized = [(0.0, 2.0, 'Stay alert and avoid crypto scams')]
-
-          def ts(v: float) -> str:
-              v = max(0.0, float(v))
-              h = int(v // 3600)
-              m = int((v % 3600) // 60)
-              s = int(v % 60)
-              ms_total = int(round((v - int(v)) * 1000))
-              carry_s, ms = divmod(ms_total, 1000)
-              s += carry_s
-              carry_m, s = divmod(s, 60)
-              m += carry_m
-              carry_h, m = divmod(m, 60)
-              h += carry_h
-              return f"{h:02}:{m:02}:{s:02},{ms:03}"
+            normalized = [(0.0, min(voice_duration, 2.0), 'Stay alert and avoid crypto scams')]
 
           with open('subtitles.srt', 'w', encoding='utf-8', newline='\n') as f:
-              for i, (start, end, text) in enumerate(normalized, 1):
-                  f.write(f"{i}\n{ts(start)} --> {ts(end)}\n{text}\n\n")
+            for idx, (start, end, txt) in enumerate(normalized, start=1):
+              f.write(f"{idx}\n{srt_ts(start)} --> {srt_ts(end)}\n{txt}\n\n")
+
+          with open('scene_count.txt', 'w', encoding='utf-8') as f:
+            f.write(str(len(image_paths)))
+          with open('voice_duration_sec.txt', 'w', encoding='utf-8') as f:
+            f.write(str(voice_duration))
+          PY
+
+      - name: Render MP4 with MoviePy
+        run: |
+          python3 - <<'PY'
+          import os
+          from PIL import Image
+          from moviepy import ImageSequenceClip, AudioFileClip, CompositeVideoClip, TextClip
+          from moviepy.video.tools.subtitles import SubtitlesClip
+
+          W, H = 1080, 1920
+          FPS = 30
+          SUBTITLE_Y = int(H * 0.56)
+
+          with open('scene_count.txt', 'r', encoding='utf-8') as f:
+            scene_count = int(f.read().strip())
+
+          image_paths = [f'scene_{i}.png' for i in range(scene_count)]
+          if not image_paths:
+            raise SystemExit('No images found for render')
 
           audio = AudioFileClip('audio.mp3')
-          duration = max(float(audio.duration or 0), voice_duration, 1.0)
-          scene_duration = duration / len(image_locals)
+          duration = max(1.0, float(audio.duration or 0.0))
+          scene_duration = duration / max(1, len(image_paths))
 
-          scenes = ImageSequenceClip(image_locals, durations=[scene_duration] * len(image_locals)).with_duration(duration)
-          if scenes.w / scenes.h > 1080 / 1920:
-              scenes = scenes.resized(width=1080)
-          else:
-              scenes = scenes.resized(height=1920)
-          scenes = scenes.with_position(('center', 'center'))
+          prepared = []
+          for i, p in enumerate(image_paths):
+            out = f'prepared_{i}.png'
+            with Image.open(p).convert('RGB') as img:
+              src_ratio = img.width / img.height
+              dst_ratio = W / H
+              if src_ratio > dst_ratio:
+                new_h = H
+                new_w = int(new_h * src_ratio)
+              else:
+                new_w = W
+                new_h = int(new_w / src_ratio)
+              resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+              left = (new_w - W) // 2
+              top = (new_h - H) // 2
+              cropped = resized.crop((left, top, left + W, top + H))
+              cropped.save(out, 'PNG')
+            prepared.append(out)
 
-          background = ColorClip(size=(1080, 1920), color=(0, 0, 0), duration=duration)
-          visuals = CompositeVideoClip([background, scenes], size=(1080, 1920)).with_duration(duration)
+          video = ImageSequenceClip(prepared, durations=[scene_duration] * len(prepared)).with_audio(audio).with_duration(duration)
 
-          def subtitle_generator(text: str):
-              return TextClip(
-                  text=text,
-                  font='/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
-                  font_size=64,
-                  color='white',
-                  stroke_color='black',
-                  stroke_width=2,
-                  method='caption',
-                  size=(980, None),
-                  text_align='center',
-              )
+          def subtitle_generator(txt: str):
+            clean = (txt or '').strip()
+            if not clean:
+              clean = ' '
+            return TextClip(
+              text=clean,
+              font_size=64,
+              color='white',
+              stroke_color='black',
+              stroke_width=3,
+              method='caption',
+              size=(860, None)
+            ).with_position(('center', SUBTITLE_Y))
 
-          subtitles = SubtitlesClip('subtitles.srt', make_textclip=subtitle_generator).with_position(('center', 1400))
-          final = CompositeVideoClip([visuals, subtitles], size=(1080, 1920)).with_duration(duration).with_audio(audio)
+          subtitles = SubtitlesClip('subtitles.srt', make_textclip=subtitle_generator)
+          final = CompositeVideoClip([video, subtitles.with_duration(duration)], size=(W, H)).with_audio(audio)
 
           final.write_videofile(
-              'render.mp4',
-              codec='libx264',
-              audio_codec='aac',
-              audio_bitrate='192k',
-              fps=30,
-              preset='medium',
-              threads=4,
-              ffmpeg_params=['-pix_fmt', 'yuv420p', '-movflags', '+faststart'],
+            'render.mp4',
+            fps=FPS,
+            codec='libx264',
+            audio_codec='aac',
+            preset='medium',
+            threads=4,
+            ffmpeg_params=['-pix_fmt', 'yuv420p', '-movflags', '+faststart']
           )
-
-          if not os.path.exists('render.mp4') or os.path.getsize('render.mp4') <= 0:
-              raise SystemExit('MoviePy render did not produce a valid render.mp4')
           PY
+
+      - name: Validate output exists
+        run: |
+          test -s render.mp4
 
       - name: Upload rendered video to Supabase storage
         env:

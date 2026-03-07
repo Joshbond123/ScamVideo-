@@ -158,24 +158,6 @@ function chooseRandomVoice() {
   return UNREAL_VOICES[Math.floor(Math.random() * UNREAL_VOICES.length)];
 }
 
-function toSrtTime(seconds: number) {
-  const total = Math.max(0, seconds);
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = Math.floor(total % 60);
-  const ms = Math.round((total - Math.floor(total)) * 1000);
-  const carryS = Math.floor(ms / 1000);
-  const fixedMs = ms % 1000;
-  const fixedS = s + carryS;
-  const carryM = Math.floor(fixedS / 60);
-  const finalS = fixedS % 60;
-  const finalM = m + carryM;
-  const carryH = Math.floor(finalM / 60);
-  const finalMins = finalM % 60;
-  const finalH = h + carryH;
-  return `${String(finalH).padStart(2, '0')}:${String(finalMins).padStart(2, '0')}:${String(finalS).padStart(2, '0')},${String(fixedMs).padStart(3, '0')}`;
-}
-
 function buildSubtitleEventsFromWords(words: VoiceTimingWord[]) {
   const events: Array<{ text: string; start: number; end: number }> = [];
   let cursor = 0;
@@ -197,24 +179,6 @@ function buildSubtitleEventsFromWords(words: VoiceTimingWord[]) {
     cursor = end;
   }
   return events;
-}
-
-async function writeSrtSubtitle(jobId: string, events: Array<{ text: string; start: number; end: number }>) {
-  const srtPath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.srt`);
-  await fs.ensureDir(path.dirname(srtPath));
-
-  const lines: string[] = [];
-  events.forEach((ev, idx) => {
-    const text = String(ev.text || '').trim();
-    if (!text) return;
-    lines.push(String(idx + 1));
-    lines.push(`${toSrtTime(ev.start)} --> ${toSrtTime(ev.end)}`);
-    lines.push(text);
-    lines.push('');
-  });
-
-  await fs.writeFile(srtPath, lines.join('\n'), 'utf8');
-  return srtPath;
 }
 
 export async function generateVoiceover(text: string, jobId: string) {
@@ -374,8 +338,7 @@ export async function assembleVideo(jobId: string, audioPath: string, imagePaths
   }
 
   const subtitleEvents = buildSubtitleEventsFromWords(meta.words);
-  const subtitleSrtPath = await writeSrtSubtitle(jobId, subtitleEvents);
-  console.info(`[render:${jobId}] subtitle_file=${subtitleSrtPath} subtitle_events=${subtitleEvents.length}`);
+  console.info(`[render:${jobId}] subtitle_format=srt subtitle_events=${subtitleEvents.length}`);
 
   const remote = await renderVideoViaGitHubActions({
     jobId,
@@ -401,29 +364,36 @@ export async function uploadToCatbox(filePath: string) {
   const hash = await readJson<any>(PATHS.settings).then((s) => s?.catboxHash);
   if (!hash) throw new Error('Catbox hash not configured');
 
-  const form = new FormData();
-  form.append('reqtype', 'fileupload');
-  form.append('userhash', hash);
-  form.append('fileToUpload', fs.createReadStream(filePath));
+  let lastPayload = '';
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const form = new FormData();
+    form.append('reqtype', 'fileupload');
+    form.append('userhash', hash);
+    form.append('fileToUpload', fs.createReadStream(filePath));
 
-  const response = await axios.post('https://catbox.moe/user/api.php', form, {
-    headers: form.getHeaders(),
-    timeout: 120_000,
-    maxBodyLength: Infinity,
-    maxContentLength: Infinity,
-  });
+    const response = await axios.post('https://catbox.moe/user/api.php', form, {
+      headers: form.getHeaders(),
+      timeout: 120_000,
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+    });
 
-  const raw = String(response.data ?? '').trim();
-  const match = raw.match(/https?:\/\/[^\s]+/i);
-  const candidate = (match?.[0] || raw).trim();
+    const raw = String(response.data ?? '').trim();
+    lastPayload = raw;
+    const match = raw.match(/https?:\/\/[^\s]+/i);
+    const candidate = (match?.[0] || raw).trim();
 
-  try {
-    const parsed = new URL(candidate);
-    if (!/^https?:$/.test(parsed.protocol)) throw new Error('unsupported protocol');
-    return parsed.toString();
-  } catch {
-    throw new Error(`Catbox upload did not return a valid URL. payload=${raw.slice(0, 500)}`);
+    try {
+      const parsed = new URL(candidate);
+      if (!/^https?:$/.test(parsed.protocol)) throw new Error('unsupported protocol');
+      return parsed.toString();
+    } catch {
+      if (attempt >= 3) break;
+      await new Promise((resolve) => setTimeout(resolve, 1200 * attempt));
+    }
   }
+
+  throw new Error(`Catbox upload did not return a valid URL. payload=${lastPayload.slice(0, 500)}`);
 }
 
 export async function cleanupJobAssets(jobId: string) {
