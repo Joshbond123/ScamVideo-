@@ -249,12 +249,13 @@ jobs:
               clean = ' '
             return TextClip(
               text=clean,
-              font_size=66,
+              font_size=84,
               color='white',
               stroke_color='black',
-              stroke_width=5,
+              stroke_width=7,
               method='caption',
-              size=(660, None)
+              font='DejaVu-Sans-Bold',
+              size=(760, None)
             )
 
           subtitles = SubtitlesClip('subtitles.srt', make_textclip=subtitle_generator).with_position(('center', SUBTITLE_Y))
