@@ -147,6 +147,7 @@ jobs:
 
           W, H = 1080, 1920
           FPS = 30
+          SUBTITLE_Y = int(H * 0.56)
 
           with open('scene_count.txt', 'r', encoding='utf-8') as f:
             scene_count = int(f.read().strip())
@@ -186,13 +187,13 @@ jobs:
               clean = ' '
             return TextClip(
               text=clean,
-              font_size=56,
+              font_size=64,
               color='white',
               stroke_color='black',
-              stroke_width=2,
+              stroke_width=3,
               method='caption',
-              size=(920, None)
-            ).with_position(('center', 0.78), relative=True)
+              size=(860, None)
+            ).with_position(('center', SUBTITLE_Y))
 
           subtitles = SubtitlesClip('subtitles.srt', make_textclip=subtitle_generator)
           final = CompositeVideoClip([video, subtitles.with_duration(duration)], size=(W, H)).with_audio(audio)
