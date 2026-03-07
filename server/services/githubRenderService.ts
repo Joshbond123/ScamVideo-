@@ -53,6 +53,8 @@ async function getConfig() {
   return { repo, token, workflow, ref, bucket, supabaseUrl, supabaseServiceRole };
 }
 
+type RenderConfig = Awaited<ReturnType<typeof getConfig>>;
+
 function ghClient(token: string) {
   return axios.create({
     baseURL: 'https://api.github.com',
@@ -144,8 +146,8 @@ function buildDispatchCandidates(configuredWorkflow: string, workflows: Workflow
   return ordered;
 }
 
-async function triggerWorkflow(jobId: string, inputs: Record<string, string>): Promise<DispatchAttempt> {
-  const { token, repo, workflow, ref } = await getConfig();
+async function triggerWorkflow(cfg: RenderConfig, jobId: string, inputs: Record<string, string>): Promise<DispatchAttempt> {
+  const { token, repo, workflow, ref } = cfg;
   const client = ghClient(token);
   const repoMeta = await getRepoMeta(token, repo);
   const workflows = await listWorkflows(token, repo);
@@ -227,8 +229,8 @@ async function triggerWorkflow(jobId: string, inputs: Record<string, string>): P
   }
 }
 
-async function waitForWorkflow(jobId: string, startedAt: number, dispatch: DispatchAttempt) {
-  const { token, repo } = await getConfig();
+async function waitForWorkflow(cfg: RenderConfig, jobId: string, startedAt: number, dispatch: DispatchAttempt) {
+  const { token, repo } = cfg;
   const client = ghClient(token);
   const timeoutMs = 25 * 60_000;
   const pollMs = 10_000;
@@ -330,8 +332,8 @@ export async function renderVideoViaGitHubActions(payload: RenderRequest) {
     voice_duration_sec: String(payload.voiceoverMeta?.durationSec || 0),
   };
 
-  const dispatch = await triggerWorkflow(payload.jobId, inputs);
-  const run = await waitForWorkflow(payload.jobId, startedAt, dispatch);
+  const dispatch = await triggerWorkflow(cfg, payload.jobId, inputs);
+  const run = await waitForWorkflow(cfg, payload.jobId, startedAt, dispatch);
   const localOutput = path.join(process.cwd(), 'database/assets/videos', `${payload.jobId}.mp4`);
   await downloadOutputFromSupabase(cfg.bucket, outputPath, localOutput, cfg.supabaseServiceRole, cfg.supabaseUrl);
 
