@@ -150,7 +150,8 @@ function normalizeWordTimings(raw: any): VoiceTimingWord[] {
       if (!word || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
       return { word, start, end };
     })
-    .filter(Boolean) as VoiceTimingWord[];
+    .filter(Boolean)
+    .sort((a: VoiceTimingWord, b: VoiceTimingWord) => a.start - b.start) as VoiceTimingWord[];
 }
 
 function chooseRandomVoice() {
@@ -168,13 +169,23 @@ function toAssTime(seconds: number) {
 
 function buildSubtitleEventsFromWords(words: VoiceTimingWord[]) {
   const events: Array<{ text: string; start: number; end: number }> = [];
-  for (let i = 0; i < words.length; i += 3) {
-    const chunk = words.slice(i, i + 3);
+  let cursor = 0;
+  for (let i = 0; i < words.length; i += 1) {
+    const word = words[i];
+    const next = words[i + 1];
+    const start = Math.max(0, Number(word.start || 0), cursor);
+    const nextStart = next ? Math.max(start + 0.04, Number(next.start || 0)) : Number.POSITIVE_INFINITY;
+    const naturalEnd = Math.max(Number(word.end || 0), start + 0.1);
+    const maxEndBeforeNext = Number.isFinite(nextStart) ? nextStart - 0.01 : Number.POSITIVE_INFINITY;
+    const end = Math.max(start + 0.05, Math.min(naturalEnd, maxEndBeforeNext));
+    const text = String(word.word || '').trim();
+    if (!text) continue;
     events.push({
-      text: chunk.map((w) => w.word).join(' '),
-      start: chunk[0].start,
-      end: chunk[chunk.length - 1].end,
+      text: text.toUpperCase(),
+      start,
+      end,
     });
+    cursor = end;
   }
   return events;
 }
@@ -312,6 +323,8 @@ export async function generateImage(prompt: string, jobId: string, sceneIdx: num
         {
           prompt,
           steps: 6,
+          width: 1080,
+          height: 1920,
         },
         {
           headers: { Authorization: `Bearer ${key.key}`, 'Content-Type': 'application/json' },
@@ -353,7 +366,7 @@ export async function generatePostImageWithTitleOverlay(prompt: string, title: s
 }
 
 export async function assembleVideo(jobId: string, audioPath: string, imagePaths: string[], subtitleLines: string[]) {
-  console.info(`[render:${jobId}] render_provider=github_actions_gstreamer`);
+  console.info(`[render:${jobId}] render_provider=github_actions_ffmpeg`);
 
   const meta = voiceMetaByJob.get(jobId);
   if (!meta?.words?.length) {
@@ -377,7 +390,7 @@ export async function assembleVideo(jobId: string, audioPath: string, imagePaths
   });
 
   if (!remote?.localOutput) {
-    throw new Error(`[render:${jobId}] render_provider=github_actions_gstreamer failed: missing local output`);
+    throw new Error(`[render:${jobId}] render_provider=github_actions_ffmpeg failed: missing local output`);
   }
 
   console.info(`[render:${jobId}] subtitles_burn_step=success output=${remote.outputPath || remote.localOutput} workflow_run=${remote.runUrl || 'n/a'}`);
@@ -400,7 +413,17 @@ export async function uploadToCatbox(filePath: string) {
     maxContentLength: Infinity,
   });
 
-  return response.data;
+  const raw = String(response.data ?? '').trim();
+  const match = raw.match(/https?:\/\/[^\s]+/i);
+  const candidate = (match?.[0] || raw).trim();
+
+  try {
+    const parsed = new URL(candidate);
+    if (!/^https?:$/.test(parsed.protocol)) throw new Error('unsupported protocol');
+    return parsed.toString();
+  } catch {
+    throw new Error(`Catbox upload did not return a valid URL. payload=${raw.slice(0, 500)}`);
+  }
 }
 
 export async function cleanupJobAssets(jobId: string) {
