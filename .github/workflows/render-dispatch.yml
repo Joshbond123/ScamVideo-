@@ -1,4 +1,4 @@
-name: ffmpeg-render
+name: moviepy-render
 run-name: Render ${{ github.event.inputs.job_id || github.event.client_payload.job_id }}
 
 on:
@@ -50,7 +50,9 @@ jobs:
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg jq python3
+          sudo apt-get install -y ffmpeg jq python3 python3-pip
+          python3 -m pip install --upgrade pip
+          python3 -m pip install moviepy==1.0.3 numpy
 
       - name: Download assets + build subtitle and concat manifests
         env:
@@ -160,17 +162,54 @@ jobs:
         run: |
           ffmpeg -hide_banner -filters | grep -E '\b(subtitles|ass)\b'
 
-      - name: Render MP4 with FFmpeg
+      - name: Render MP4 with MoviePy
         run: |
           set -euo pipefail
-          ffmpeg -y -hide_banner -loglevel error \
-            -f concat -safe 0 -i images.txt \
-            -i audio.mp3 \
-            -vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,subtitles=subtitles.ass:charenc=UTF-8" \
-            -r 30 -pix_fmt yuv420p \
-            -c:v libx264 -preset medium -profile:v high -level 4.1 -movflags +faststart \
-            -c:a aac -b:a 192k -ar 48000 -ac 2 \
-            -shortest render.mp4
+          python3 - <<'PY'
+          import json
+          from moviepy.editor import AudioFileClip, ImageClip, concatenate_videoclips
+
+          with open('images.txt', 'r', encoding='utf-8') as f:
+              lines = [line.strip() for line in f if line.strip()]
+
+          scene_files = [line.split("'", 2)[1] for line in lines if line.startswith('file ')]
+          if len(scene_files) > 1:
+              # concat manifest repeats the final frame once; drop duplicate for clip assembly
+              scene_files = scene_files[:-1]
+
+          with open('scene_count.txt', 'r', encoding='utf-8') as f:
+              declared_count = int(f.read().strip() or '0')
+
+          if declared_count and len(scene_files) != declared_count:
+              raise RuntimeError(f'image manifest mismatch declared={declared_count} parsed={len(scene_files)}')
+
+          audio = AudioFileClip('audio.mp3')
+          duration = float(audio.duration or 1.0)
+          scene_duration = max(0.5, duration / max(1, len(scene_files)))
+
+          clips = [ImageClip(path).set_duration(scene_duration).resize((1080, 1920)).set_fps(30) for path in scene_files]
+          if not clips:
+              raise RuntimeError('No scene images found for render')
+
+          video = concatenate_videoclips(clips, method='compose').set_audio(audio)
+          video = video.set_duration(duration)
+          video.write_videofile(
+              'render.mp4',
+              codec='libx264',
+              audio_codec='aac',
+              fps=30,
+              preset='medium',
+              threads=4,
+              ffmpeg_params=['-pix_fmt', 'yuv420p', '-movflags', '+faststart'],
+              verbose=False,
+              logger=None,
+          )
+
+          video.close()
+          audio.close()
+          for clip in clips:
+              clip.close()
+          PY
 
           test -s render.mp4
 
