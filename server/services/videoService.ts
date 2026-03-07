@@ -150,60 +150,35 @@ function normalizeWordTimings(raw: any): VoiceTimingWord[] {
       if (!word || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
       return { word, start, end };
     })
-    .filter(Boolean) as VoiceTimingWord[];
+    .filter(Boolean)
+    .sort((a: VoiceTimingWord, b: VoiceTimingWord) => a.start - b.start) as VoiceTimingWord[];
 }
 
 function chooseRandomVoice() {
   return UNREAL_VOICES[Math.floor(Math.random() * UNREAL_VOICES.length)];
 }
 
-function toAssTime(seconds: number) {
-  const total = Math.max(0, seconds);
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = Math.floor(total % 60);
-  const cs = Math.floor((total - Math.floor(total)) * 100);
-  return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
-}
-
 function buildSubtitleEventsFromWords(words: VoiceTimingWord[]) {
   const events: Array<{ text: string; start: number; end: number }> = [];
-  for (let i = 0; i < words.length; i += 3) {
-    const chunk = words.slice(i, i + 3);
+  let cursor = 0;
+  for (let i = 0; i < words.length; i += 1) {
+    const word = words[i];
+    const next = words[i + 1];
+    const start = Math.max(0, Number(word.start || 0), cursor);
+    const nextStart = next ? Math.max(start + 0.04, Number(next.start || 0)) : Number.POSITIVE_INFINITY;
+    const naturalEnd = Math.max(Number(word.end || 0), start + 0.1);
+    const maxEndBeforeNext = Number.isFinite(nextStart) ? nextStart - 0.01 : Number.POSITIVE_INFINITY;
+    const end = Math.max(start + 0.05, Math.min(naturalEnd, maxEndBeforeNext));
+    const text = String(word.word || '').trim();
+    if (!text) continue;
     events.push({
-      text: chunk.map((w) => w.word).join(' '),
-      start: chunk[0].start,
-      end: chunk[chunk.length - 1].end,
+      text: text.toUpperCase(),
+      start,
+      end,
     });
+    cursor = end;
   }
   return events;
-}
-
-async function writeAssSubtitle(jobId: string, events: Array<{ text: string; start: number; end: number }>) {
-  const assPath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.ass`);
-  await fs.ensureDir(path.dirname(assPath));
-
-  const ass = [
-    '[Script Info]',
-    'ScriptType: v4.00+',
-    'PlayResX: 1080',
-    'PlayResY: 1920',
-    '',
-    '[V4+ Styles]',
-    'Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding',
-    'Style: Viral,Arial,58,&H00FFFFFF,&H0000FFFF,&H00332200,&H66000000,1,0,0,0,100,100,0,0,3,3,0,2,60,60,120,1',
-    '',
-    '[Events]',
-    'Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text',
-  ];
-
-  for (const ev of events) {
-    const safe = ev.text.replace(/,/g, '\\,').replace(/\{/g, '(').replace(/\}/g, ')');
-    ass.push(`Dialogue: 0,${toAssTime(ev.start)},${toAssTime(ev.end)},Viral,,0,0,0,,${safe}`);
-  }
-
-  await fs.writeFile(assPath, ass.join('\n'), 'utf8');
-  return assPath;
 }
 
 export async function generateVoiceover(text: string, jobId: string) {
@@ -312,6 +287,8 @@ export async function generateImage(prompt: string, jobId: string, sceneIdx: num
         {
           prompt,
           steps: 6,
+          width: 1080,
+          height: 1920,
         },
         {
           headers: { Authorization: `Bearer ${key.key}`, 'Content-Type': 'application/json' },
@@ -353,7 +330,7 @@ export async function generatePostImageWithTitleOverlay(prompt: string, title: s
 }
 
 export async function assembleVideo(jobId: string, audioPath: string, imagePaths: string[], subtitleLines: string[]) {
-  console.info(`[render:${jobId}] render_provider=github_actions_gstreamer`);
+  console.info(`[render:${jobId}] render_provider=github_actions_moviepy`);
 
   const meta = voiceMetaByJob.get(jobId);
   if (!meta?.words?.length) {
@@ -361,8 +338,7 @@ export async function assembleVideo(jobId: string, audioPath: string, imagePaths
   }
 
   const subtitleEvents = buildSubtitleEventsFromWords(meta.words);
-  const subtitleAssPath = await writeAssSubtitle(jobId, subtitleEvents);
-  console.info(`[render:${jobId}] subtitle_file=${subtitleAssPath} subtitle_events=${subtitleEvents.length}`);
+  console.info(`[render:${jobId}] subtitle_format=srt subtitle_events=${subtitleEvents.length}`);
 
   const remote = await renderVideoViaGitHubActions({
     jobId,
@@ -377,7 +353,7 @@ export async function assembleVideo(jobId: string, audioPath: string, imagePaths
   });
 
   if (!remote?.localOutput) {
-    throw new Error(`[render:${jobId}] render_provider=github_actions_gstreamer failed: missing local output`);
+    throw new Error(`[render:${jobId}] render_provider=github_actions_moviepy failed: missing local output`);
   }
 
   console.info(`[render:${jobId}] subtitles_burn_step=success output=${remote.outputPath || remote.localOutput} workflow_run=${remote.runUrl || 'n/a'}`);
@@ -388,26 +364,43 @@ export async function uploadToCatbox(filePath: string) {
   const hash = await readJson<any>(PATHS.settings).then((s) => s?.catboxHash);
   if (!hash) throw new Error('Catbox hash not configured');
 
-  const form = new FormData();
-  form.append('reqtype', 'fileupload');
-  form.append('userhash', hash);
-  form.append('fileToUpload', fs.createReadStream(filePath));
+  let lastPayload = '';
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const form = new FormData();
+    form.append('reqtype', 'fileupload');
+    form.append('userhash', hash);
+    form.append('fileToUpload', fs.createReadStream(filePath));
 
-  const response = await axios.post('https://catbox.moe/user/api.php', form, {
-    headers: form.getHeaders(),
-    timeout: 120_000,
-    maxBodyLength: Infinity,
-    maxContentLength: Infinity,
-  });
+    const response = await axios.post('https://catbox.moe/user/api.php', form, {
+      headers: form.getHeaders(),
+      timeout: 120_000,
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+    });
 
-  return response.data;
+    const raw = String(response.data ?? '').trim();
+    lastPayload = raw;
+    const match = raw.match(/https?:\/\/[^\s]+/i);
+    const candidate = (match?.[0] || raw).trim();
+
+    try {
+      const parsed = new URL(candidate);
+      if (!/^https?:$/.test(parsed.protocol)) throw new Error('unsupported protocol');
+      return parsed.toString();
+    } catch {
+      if (attempt >= 3) break;
+      await new Promise((resolve) => setTimeout(resolve, 1200 * attempt));
+    }
+  }
+
+  throw new Error(`Catbox upload did not return a valid URL. payload=${lastPayload.slice(0, 500)}`);
 }
 
 export async function cleanupJobAssets(jobId: string) {
   const audioPath = path.join(process.cwd(), 'database/assets/audio', `${jobId}.mp3`);
   const imageDir = path.join(process.cwd(), 'database/assets/images', jobId);
   const videoPath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.mp4`);
-  const subtitlePath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.ass`);
+  const subtitlePath = path.join(process.cwd(), 'database/assets/videos', `${jobId}.srt`);
   await Promise.all([fs.remove(audioPath), fs.remove(imageDir), fs.remove(videoPath), fs.remove(subtitlePath)]);
   voiceMetaByJob.delete(jobId);
 
@@ -415,7 +408,7 @@ export async function cleanupJobAssets(jobId: string) {
     await deleteSupabaseAssets([
       `jobs/${jobId}/audio.mp3`,
       `jobs/${jobId}/render.mp4`,
-      `jobs/${jobId}/subtitles.ass`,
+      `jobs/${jobId}/subtitles.srt`,
       ...Array.from({ length: 16 }).map((_, idx) => `jobs/${jobId}/scene_${idx}.png`),
     ]);
   } catch (error) {
