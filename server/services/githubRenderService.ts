@@ -117,7 +117,7 @@ function pickWorkflow(configuredWorkflow: string, workflows: WorkflowRef[]) {
   });
   if (byConfigured) return byConfigured;
 
-  const preferred = ['render-dispatch.yml', 'ffmpeg-render.yml', 'video-render-dispatch.yml'];
+  const preferred = ['render-dispatch.yml', 'moviepy-render.yml', 'ffmpeg-render.yml', 'video-render-dispatch.yml'];
   for (const file of preferred) {
     const found = workflows.find((w) => (w.path.split('/').pop() || '').toLowerCase() === file);
     if (found) return found;
@@ -136,7 +136,7 @@ function buildDispatchCandidates(configuredWorkflow: string, workflows: Workflow
 
   pushUnique(pickWorkflow(configuredWorkflow, workflows));
 
-  const preferred = ['ffmpeg-render.yml', 'render-dispatch.yml', 'video-render-dispatch.yml', 'gstreamer-render.yml'];
+  const preferred = ['moviepy-render.yml', 'ffmpeg-render.yml', 'render-dispatch.yml', 'video-render-dispatch.yml', 'gstreamer-render.yml'];
   for (const file of preferred) {
     pushUnique(workflows.find((w) => (w.path.split('/').pop() || '').toLowerCase() === file));
   }
@@ -253,12 +253,20 @@ async function waitForWorkflow(jobId: string, startedAt: number, dispatch: Dispa
       .map((r: any) => `${r?.id || 'n/a'}:${r?.event || 'n/a'}:${r?.status || 'n/a'}:${r?.display_title || r?.name || ''}`)
       .join(' | ');
 
-    const found = all.find((r: any) => {
+    const foundByJobId = all.find((r: any) => {
       const title = String(r?.display_title || r?.name || '');
       const created = new Date(r?.created_at || 0).getTime();
       const evt = String(r?.event || '');
       return created >= startedAt - 5 * 60_000 && title.includes(jobId) && (evt === 'workflow_dispatch' || evt === 'repository_dispatch');
     });
+
+    const foundByTiming = all.find((r: any) => {
+      const created = new Date(r?.created_at || 0).getTime();
+      const evt = String(r?.event || '');
+      return created >= startedAt - 5_000 && (evt === 'workflow_dispatch' || evt === 'repository_dispatch');
+    });
+
+    const found = foundByJobId || foundByTiming;
 
     if (found) {
       runId = found.id;
@@ -303,7 +311,7 @@ export async function renderVideoViaGitHubActions(payload: RenderRequest) {
   const startedAt = Date.now();
   const outputPath = `jobs/${payload.jobId}/render.mp4`;
 
-  console.info(`[render:${payload.jobId}] render_provider=github_actions_ffmpeg workflow=${cfg.workflow} repo=${cfg.repo}`);
+  console.info(`[render:${payload.jobId}] render_provider=github_actions workflow=${cfg.workflow} repo=${cfg.repo}`);
 
   const uploadedAudio = await uploadLocalAssetToSupabase(payload.audioPath, `jobs/${payload.jobId}/audio.mp3`, 'audio/mpeg');
   const uploadedImages: string[] = [];
@@ -331,7 +339,7 @@ export async function renderVideoViaGitHubActions(payload: RenderRequest) {
     localOutput,
     outputPath,
     runUrl: run.htmlUrl,
-    renderProvider: 'github_actions_ffmpeg',
+    renderProvider: 'github_actions',
     tempPaths: [uploadedAudio, ...uploadedImages, outputPath],
   };
 }
