@@ -194,7 +194,7 @@ jobs:
               size=(920, None)
             ).with_position(('center', 0.78), relative=True)
 
-          subtitles = SubtitlesClip('subtitles.srt', subtitle_generator)
+          subtitles = SubtitlesClip('subtitles.srt', make_textclip=subtitle_generator)
           final = CompositeVideoClip([video, subtitles.with_duration(duration)], size=(W, H)).with_audio(audio)
 
           final.write_videofile(
