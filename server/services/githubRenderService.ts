@@ -45,13 +45,15 @@ async function readConfigValue(name: string) {
 async function getConfig() {
   const repo = (process.env.GITHUB_RENDER_REPO || process.env.RENDER_REPO || '').trim() || await readConfigValue('GITHUB_RENDER_REPO');
   const token = (process.env.GITHUB_PAT || process.env.RENDER_GITHUB_PAT || '').trim() || await readConfigValue('GITHUB_PAT');
-  const workflow = (process.env.GITHUB_RENDER_WORKFLOW || 'render-dispatch.yml').trim();
+  const workflow = (process.env.GITHUB_RENDER_WORKFLOW || 'moviepy-render.yml').trim();
   const ref = (process.env.GITHUB_RENDER_REF || 'main').trim();
   const bucket = (process.env.SUPABASE_MEDIA_BUCKET || 'temp-media').trim();
   const supabaseUrl = await readConfigValue('SUPABASE_URL');
   const supabaseServiceRole = await readConfigValue('SUPABASE_SERVICE_ROLE_KEY');
   return { repo, token, workflow, ref, bucket, supabaseUrl, supabaseServiceRole };
 }
+
+type RenderConfig = Awaited<ReturnType<typeof getConfig>>;
 
 function ghClient(token: string) {
   return axios.create({
@@ -117,7 +119,7 @@ function pickWorkflow(configuredWorkflow: string, workflows: WorkflowRef[]) {
   });
   if (byConfigured) return byConfigured;
 
-  const preferred = ['render-dispatch.yml', 'ffmpeg-render.yml', 'video-render-dispatch.yml'];
+  const preferred = ['moviepy-render.yml', 'render-dispatch.yml', 'video-render-dispatch.yml', 'ffmpeg-render.yml'];
   for (const file of preferred) {
     const found = workflows.find((w) => (w.path.split('/').pop() || '').toLowerCase() === file);
     if (found) return found;
@@ -136,7 +138,7 @@ function buildDispatchCandidates(configuredWorkflow: string, workflows: Workflow
 
   pushUnique(pickWorkflow(configuredWorkflow, workflows));
 
-  const preferred = ['ffmpeg-render.yml', 'render-dispatch.yml', 'video-render-dispatch.yml', 'gstreamer-render.yml'];
+  const preferred = ['moviepy-render.yml', 'render-dispatch.yml', 'video-render-dispatch.yml', 'ffmpeg-render.yml', 'gstreamer-render.yml'];
   for (const file of preferred) {
     pushUnique(workflows.find((w) => (w.path.split('/').pop() || '').toLowerCase() === file));
   }
@@ -144,8 +146,8 @@ function buildDispatchCandidates(configuredWorkflow: string, workflows: Workflow
   return ordered;
 }
 
-async function triggerWorkflow(jobId: string, inputs: Record<string, string>): Promise<DispatchAttempt> {
-  const { token, repo, workflow, ref } = await getConfig();
+async function triggerWorkflow(cfg: RenderConfig, jobId: string, inputs: Record<string, string>): Promise<DispatchAttempt> {
+  const { token, repo, workflow, ref } = cfg;
   const client = ghClient(token);
   const repoMeta = await getRepoMeta(token, repo);
   const workflows = await listWorkflows(token, repo);
@@ -227,8 +229,8 @@ async function triggerWorkflow(jobId: string, inputs: Record<string, string>): P
   }
 }
 
-async function waitForWorkflow(jobId: string, startedAt: number, dispatch: DispatchAttempt) {
-  const { token, repo } = await getConfig();
+async function waitForWorkflow(cfg: RenderConfig, jobId: string, startedAt: number, dispatch: DispatchAttempt) {
+  const { token, repo } = cfg;
   const client = ghClient(token);
   const timeoutMs = 25 * 60_000;
   const pollMs = 10_000;
@@ -253,12 +255,20 @@ async function waitForWorkflow(jobId: string, startedAt: number, dispatch: Dispa
       .map((r: any) => `${r?.id || 'n/a'}:${r?.event || 'n/a'}:${r?.status || 'n/a'}:${r?.display_title || r?.name || ''}`)
       .join(' | ');
 
-    const found = all.find((r: any) => {
+    const foundByJobId = all.find((r: any) => {
       const title = String(r?.display_title || r?.name || '');
       const created = new Date(r?.created_at || 0).getTime();
       const evt = String(r?.event || '');
       return created >= startedAt - 5 * 60_000 && title.includes(jobId) && (evt === 'workflow_dispatch' || evt === 'repository_dispatch');
     });
+
+    const foundByTiming = all.find((r: any) => {
+      const created = new Date(r?.created_at || 0).getTime();
+      const evt = String(r?.event || '');
+      return created >= startedAt - 5_000 && (evt === 'workflow_dispatch' || evt === 'repository_dispatch');
+    });
+
+    const found = foundByJobId || foundByTiming;
 
     if (found) {
       runId = found.id;
@@ -303,7 +313,7 @@ export async function renderVideoViaGitHubActions(payload: RenderRequest) {
   const startedAt = Date.now();
   const outputPath = `jobs/${payload.jobId}/render.mp4`;
 
-  console.info(`[render:${payload.jobId}] render_provider=github_actions_ffmpeg workflow=${cfg.workflow} repo=${cfg.repo}`);
+  console.info(`[render:${payload.jobId}] render_provider=github_actions workflow=${cfg.workflow} repo=${cfg.repo}`);
 
   const uploadedAudio = await uploadLocalAssetToSupabase(payload.audioPath, `jobs/${payload.jobId}/audio.mp3`, 'audio/mpeg');
   const uploadedImages: string[] = [];
@@ -322,8 +332,8 @@ export async function renderVideoViaGitHubActions(payload: RenderRequest) {
     voice_duration_sec: String(payload.voiceoverMeta?.durationSec || 0),
   };
 
-  const dispatch = await triggerWorkflow(payload.jobId, inputs);
-  const run = await waitForWorkflow(payload.jobId, startedAt, dispatch);
+  const dispatch = await triggerWorkflow(cfg, payload.jobId, inputs);
+  const run = await waitForWorkflow(cfg, payload.jobId, startedAt, dispatch);
   const localOutput = path.join(process.cwd(), 'database/assets/videos', `${payload.jobId}.mp4`);
   await downloadOutputFromSupabase(cfg.bucket, outputPath, localOutput, cfg.supabaseServiceRole, cfg.supabaseUrl);
 
@@ -331,7 +341,7 @@ export async function renderVideoViaGitHubActions(payload: RenderRequest) {
     localOutput,
     outputPath,
     runUrl: run.htmlUrl,
-    renderProvider: 'github_actions_ffmpeg',
+    renderProvider: 'github_actions',
     tempPaths: [uploadedAudio, ...uploadedImages, outputPath],
   };
 }
