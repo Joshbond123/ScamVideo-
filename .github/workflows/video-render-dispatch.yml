@@ -1,93 +1,196 @@
-name: video-render-dispatch
-run-name: Render ${{ github.event.client_payload.job_id || inputs.job_id }}
+name: moviepy-render
+run-name: Render ${{ github.event.inputs.job_id || github.event.client_payload.job_id }}
 
 on:
-  repository_dispatch:
-    types: [render_video]
   workflow_dispatch:
     inputs:
       job_id:
+        description: Render job id
         required: true
+        type: string
+      supabase_url:
+        description: Supabase project URL
+        required: true
+        type: string
+      supabase_service_role_key:
+        description: Supabase service role key
+        required: true
+        type: string
       bucket:
+        description: Supabase storage bucket
         required: true
+        type: string
       audio_path:
+        description: Audio object path
         required: true
+        type: string
       image_paths_json:
+        description: JSON array of image object paths
         required: true
+        type: string
       subtitle_events_json:
+        description: JSON subtitle events
         required: true
+        type: string
       output_path:
+        description: Output object path
         required: true
+        type: string
       voice_duration_sec:
+        description: Voice duration in seconds
         required: true
+        type: string
+  repository_dispatch:
+    types: [render_video]
 
 jobs:
   render:
     runs-on: ubuntu-latest
-    env:
-      SUPABASE_URL: ${{ vars.SUPABASE_URL }}
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      BUCKET: ${{ github.event.client_payload.bucket || inputs.bucket }}
-      AUDIO_PATH: ${{ github.event.client_payload.audio_path || inputs.audio_path }}
-      IMAGE_PATHS_JSON: ${{ github.event.client_payload.image_paths_json || inputs.image_paths_json }}
-      SUBTITLE_EVENTS_JSON: ${{ github.event.client_payload.subtitle_events_json || inputs.subtitle_events_json }}
-      VOICE_DURATION_SEC: ${{ github.event.client_payload.voice_duration_sec || inputs.voice_duration_sec }}
-      OUTPUT_PATH: ${{ github.event.client_payload.output_path || inputs.output_path }}
     steps:
-      - name: Install deps
+      - name: Install MoviePy deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav python3
+          sudo apt-get install -y ffmpeg jq python3 python3-pip fonts-dejavu-core
+          python3 -m pip install --upgrade pip
+          python3 -m pip install moviepy==2.1.2 pillow
 
-      - name: Download assets + build SRT
+      - name: Download assets + generate subtitles.srt + render with MoviePy
+        env:
+          SUPABASE_URL: ${{ github.event.inputs.supabase_url || github.event.client_payload.supabase_url }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ github.event.inputs.supabase_service_role_key || github.event.client_payload.supabase_service_role_key }}
+          BUCKET: ${{ github.event.inputs.bucket || github.event.client_payload.bucket }}
+          AUDIO_PATH: ${{ github.event.inputs.audio_path || github.event.client_payload.audio_path }}
+          IMAGE_PATHS_JSON: ${{ github.event.inputs.image_paths_json || github.event.client_payload.image_paths_json }}
+          SUBTITLE_EVENTS_JSON: ${{ github.event.inputs.subtitle_events_json || github.event.client_payload.subtitle_events_json }}
+          VOICE_DURATION_SEC: ${{ github.event.inputs.voice_duration_sec || github.event.client_payload.voice_duration_sec }}
         run: |
           python3 - <<'PY'
-import os, json, urllib.request
-base = os.environ['SUPABASE_URL'].rstrip('/')
-key = os.environ['SUPABASE_SERVICE_ROLE_KEY']
-bucket = os.environ['BUCKET']
-audio_path = os.environ['AUDIO_PATH']
-image_paths = json.loads(os.environ['IMAGE_PATHS_JSON'])
-subtitle_events = json.loads(os.environ['SUBTITLE_EVENTS_JSON'])
+          import json
+          import os
+          import urllib.request
 
-def dl(remote, local):
-    req = urllib.request.Request(f"{base}/storage/v1/object/{bucket}/{remote}", headers={"apikey": key, "Authorization": f"Bearer {key}"})
-    with urllib.request.urlopen(req, timeout=120) as r:
-        data = r.read()
-    with open(local, 'wb') as f:
-        f.write(data)
+          from moviepy import AudioFileClip, ColorClip, CompositeVideoClip, ImageSequenceClip, TextClip
+          from moviepy.video.tools.subtitles import SubtitlesClip
 
-dl(audio_path, 'audio.mp3')
-for idx, p in enumerate(image_paths):
-    dl(p, f'scene_{idx}.png')
+          base = os.environ['SUPABASE_URL'].rstrip('/')
+          key = os.environ['SUPABASE_SERVICE_ROLE_KEY']
+          bucket = os.environ['BUCKET']
+          audio_path = os.environ['AUDIO_PATH']
+          image_paths = json.loads(os.environ['IMAGE_PATHS_JSON'])
+          subtitle_events = json.loads(os.environ['SUBTITLE_EVENTS_JSON'])
+          voice_duration = max(1.0, float(os.environ.get('VOICE_DURATION_SEC') or 1.0))
 
-with open('subtitles.srt', 'w', encoding='utf-8') as f:
-    for i, ev in enumerate(subtitle_events, 1):
-        def ts(v):
-            v = max(0.0, float(v)); h=int(v//3600); m=int((v%3600)//60); s=int(v%60); ms=int((v-int(v))*1000)
-            return f"{h:02}:{m:02}:{s:02},{ms:03}"
-        txt = str(ev.get('text','')).strip()
-        if not txt: continue
-        f.write(f"{i}\n{ts(ev.get('start',0))} --> {ts(ev.get('end',0))}\n{txt}\n\n")
+          if not image_paths:
+              raise SystemExit('image_paths_json must include at least one scene image')
 
-n = max(1, len(image_paths)); d = max(1.0, float(os.environ.get('VOICE_DURATION_SEC') or 1.0))
-fps = max(0.01, n / d)
-with open('fps.txt', 'w', encoding='utf-8') as f:
-    f.write(f"{max(1, int(round(fps*1000)))}/1000")
-PY
+          def dl(remote: str, local: str):
+              req = urllib.request.Request(
+                  f"{base}/storage/v1/object/{bucket}/{remote}",
+                  headers={"apikey": key, "Authorization": f"Bearer {key}"},
+              )
+              with urllib.request.urlopen(req, timeout=120) as r:
+                  data = r.read()
+              with open(local, 'wb') as f:
+                  f.write(data)
 
-      - name: Render MP4 with GStreamer
-        run: |
-          FPS=$(cat fps.txt)
-          gst-launch-1.0 -e \
-            multifilesrc location="scene_%d.png" index=0 caps="image/png,framerate=${FPS}" ! pngdec ! imagefreeze ! videoconvert ! videoscale ! video/x-raw,width=1080,height=1920,framerate=30/1 ! subtitleoverlay name=sub ! x264enc speed-preset=veryfast tune=zerolatency bitrate=3500 key-int-max=60 ! h264parse ! queue ! mux. \
-            filesrc location="audio.mp3" ! decodebin ! audioconvert ! audioresample ! voaacenc bitrate=192000 ! queue ! mux. \
-            filesrc location="subtitles.srt" ! subparse ! sub. \
-            mp4mux name=mux ! filesink location="render.mp4"
+          dl(audio_path, 'audio.mp3')
+          image_locals = []
+          for idx, p in enumerate(image_paths):
+              local = f'scene_{idx}.png'
+              dl(p, local)
+              image_locals.append(os.path.abspath(local))
+
+          blocks = []
+          for ev in subtitle_events:
+              start = float(ev.get('start', 0) or 0)
+              end = float(ev.get('end', 0) or 0)
+              text = ' '.join(str(ev.get('text', '')).replace('\n', ' ').split())
+              if text:
+                  blocks.append((start, end, text))
+
+          blocks.sort(key=lambda x: x[0])
+          normalized = []
+          cursor = 0.0
+          for start, end, text in blocks:
+              start = max(0.0, start, cursor)
+              end = max(start + 0.05, end)
+              normalized.append((start, end, text))
+              cursor = end
+
+          if not normalized:
+              normalized = [(0.0, 2.0, 'Stay alert and avoid crypto scams')]
+
+          def ts(v: float) -> str:
+              v = max(0.0, float(v))
+              h = int(v // 3600)
+              m = int((v % 3600) // 60)
+              s = int(v % 60)
+              ms_total = int(round((v - int(v)) * 1000))
+              carry_s, ms = divmod(ms_total, 1000)
+              s += carry_s
+              carry_m, s = divmod(s, 60)
+              m += carry_m
+              carry_h, m = divmod(m, 60)
+              h += carry_h
+              return f"{h:02}:{m:02}:{s:02},{ms:03}"
+
+          with open('subtitles.srt', 'w', encoding='utf-8', newline='\n') as f:
+              for i, (start, end, text) in enumerate(normalized, 1):
+                  f.write(f"{i}\n{ts(start)} --> {ts(end)}\n{text}\n\n")
+
+          audio = AudioFileClip('audio.mp3')
+          duration = max(float(audio.duration or 0), voice_duration, 1.0)
+          scene_duration = duration / len(image_locals)
+
+          scenes = ImageSequenceClip(image_locals, durations=[scene_duration] * len(image_locals)).with_duration(duration)
+          if scenes.w / scenes.h > 1080 / 1920:
+              scenes = scenes.resized(width=1080)
+          else:
+              scenes = scenes.resized(height=1920)
+          scenes = scenes.with_position(('center', 'center'))
+
+          background = ColorClip(size=(1080, 1920), color=(0, 0, 0), duration=duration)
+          visuals = CompositeVideoClip([background, scenes], size=(1080, 1920)).with_duration(duration)
+
+          def subtitle_generator(text: str):
+              return TextClip(
+                  text=text,
+                  font='/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+                  font_size=64,
+                  color='white',
+                  stroke_color='black',
+                  stroke_width=2,
+                  method='caption',
+                  size=(980, None),
+                  text_align='center',
+              )
+
+          subtitles = SubtitlesClip('subtitles.srt', make_textclip=subtitle_generator).with_position(('center', 1400))
+          final = CompositeVideoClip([visuals, subtitles], size=(1080, 1920)).with_duration(duration).with_audio(audio)
+
+          final.write_videofile(
+              'render.mp4',
+              codec='libx264',
+              audio_codec='aac',
+              audio_bitrate='192k',
+              fps=30,
+              preset='medium',
+              threads=4,
+              ffmpeg_params=['-pix_fmt', 'yuv420p', '-movflags', '+faststart'],
+          )
+
+          if not os.path.exists('render.mp4') or os.path.getsize('render.mp4') <= 0:
+              raise SystemExit('MoviePy render did not produce a valid render.mp4')
+          PY
 
       - name: Upload rendered video to Supabase storage
+        env:
+          SUPABASE_URL: ${{ github.event.inputs.supabase_url || github.event.client_payload.supabase_url }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ github.event.inputs.supabase_service_role_key || github.event.client_payload.supabase_service_role_key }}
+          BUCKET: ${{ github.event.inputs.bucket || github.event.client_payload.bucket }}
+          OUTPUT_PATH: ${{ github.event.inputs.output_path || github.event.client_payload.output_path }}
         run: |
-          curl -sS -X POST "${SUPABASE_URL}/storage/v1/object/${BUCKET}/${OUTPUT_PATH}" \
+          curl -sS --fail-with-body -X POST "${SUPABASE_URL}/storage/v1/object/${BUCKET}/${OUTPUT_PATH}" \
             -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
             -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
             -H "x-upsert: true" \
