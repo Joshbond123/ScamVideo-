@@ -98,10 +98,10 @@ jobs:
           };
 
           (async () => {
-            await dl(audioPath, 'render-assets/audio.mp3');
+            await dl(audioPath, 'public/render-assets/audio.mp3');
             const localImages = [];
             for (let i = 0; i < imagePaths.length; i += 1) {
-              const localPath = `render-assets/scene_${i}.png`;
+              const localPath = `public/render-assets/scene_${i}.png`;
               await dl(imagePaths[i], localPath);
               localImages.push(localPath);
             }
@@ -118,8 +118,8 @@ jobs:
               'render-input.json',
               JSON.stringify(
                 {
-                  audioPath: 'render-assets/audio.mp3',
-                  imagePaths: localImages,
+                  audioPath: '/render-assets/audio.mp3',
+                  imagePaths: localImages.map((x) => x.replace(/^public/, '')),
                   subtitleEvents: normalizedSubtitles,
                   voiceDurationSec,
                 },
