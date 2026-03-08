@@ -12,7 +12,7 @@ export const RemotionRoot: React.FC = () => {
       height={1920}
       fps={30}
       durationInFrames={300}
-      defaultProps={{audioPath: '', imagePaths: [], subtitleEvents: [], voiceDurationSec: 10}}
+      defaultProps={{audioPath: '', backgroundMusicUrl: '', backgroundMusicVolume: 0.1, imagePaths: [], subtitleEvents: [], voiceDurationSec: 10}}
       calculateMetadata={({props}) => ({
         durationInFrames: Math.max(30, Math.ceil((Number(props?.voiceDurationSec || 1) + 0.2) * 30)),
       })}

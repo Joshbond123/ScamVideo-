@@ -15,12 +15,21 @@ import {
 export type SubtitleEvent = {text: string; start: number; end: number};
 export type RenderProps = {
   audioPath: string;
+  backgroundMusicUrl?: string;
+  backgroundMusicVolume?: number;
   imagePaths: string[];
   subtitleEvents: SubtitleEvent[];
   voiceDurationSec: number;
 };
 
-export const ShortVideo: React.FC<RenderProps> = ({audioPath, imagePaths, subtitleEvents, voiceDurationSec}) => {
+export const ShortVideo: React.FC<RenderProps> = ({
+  audioPath,
+  backgroundMusicUrl,
+  backgroundMusicVolume = 0.1,
+  imagePaths,
+  subtitleEvents,
+  voiceDurationSec,
+}) => {
   const frame = useCurrentFrame();
   const {fps, durationInFrames} = useVideoConfig();
 
@@ -76,7 +85,8 @@ export const ShortVideo: React.FC<RenderProps> = ({audioPath, imagePaths, subtit
         );
       })}
 
-      {audioPath ? <Audio src={resolveAsset(audioPath)} /> : null}
+      {backgroundMusicUrl ? <Audio src={resolveAsset(backgroundMusicUrl)} volume={backgroundMusicVolume} /> : null}
+      {audioPath ? <Audio src={resolveAsset(audioPath)} volume={1} /> : null}
 
       <AbsoluteFill
         style={{
