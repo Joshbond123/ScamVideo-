@@ -18,6 +18,12 @@ type GeneratedScript = {
   hashtags: string;
 };
 
+type BackgroundTrack = {
+  title: string;
+  url: string;
+  volume: number;
+};
+
 type VoiceTimingWord = { word: string; start: number; end: number };
 type VoiceoverMeta = {
   voiceId: string;
@@ -27,7 +33,18 @@ type VoiceoverMeta = {
 };
 
 const UNREAL_VOICES = ['Oliver', 'Noah', 'Ethan', 'Daniel'];
+const BACKGROUND_TRACKS: BackgroundTrack[] = [
+  { title: 'Cyber Pulse', url: 'https://assets.mixkit.co/music/preview/mixkit-tech-house-vibes-130.mp3', volume: 0.12 },
+  { title: 'Urban Momentum', url: 'https://assets.mixkit.co/music/preview/mixkit-hip-hop-02-738.mp3', volume: 0.1 },
+  { title: 'Alert Beat', url: 'https://assets.mixkit.co/music/preview/mixkit-raising-me-higher-34.mp3', volume: 0.11 },
+  { title: 'Pulse Drive', url: 'https://assets.mixkit.co/music/preview/mixkit-driving-ambition-32.mp3', volume: 0.1 },
+  { title: 'Trend Snap', url: 'https://assets.mixkit.co/music/preview/mixkit-modern-technology-133.mp3', volume: 0.11 },
+];
+let lastBackgroundTrackUrl: string | null = null;
 const voiceMetaByJob = new Map<string, VoiceoverMeta>();
+
+const PRE_CTA_VICTIM_SUPPORT_MESSAGE =
+  'If you sent crypto to scammers, check the link in our bio or comments to report the scam and submit your case so investigators can help recover your lost crypto.';
 
 function stripToSingleLine(value: string, maxLen: number) {
   const compact = String(value || '').replace(/\s+/g, ' ').trim();
@@ -43,6 +60,11 @@ function sceneImagePromptFromNarration(sceneText: string, topic: string) {
   const scene = stripToSingleLine(sceneText, 260);
   const focusedTopic = stripToSingleLine(topic, 120);
   return `${scene}. Visualize this exact moment from the topic: ${focusedTopic}. Documentary realism, cinematic vertical 9:16, high detail, natural lighting, no text, no letters, no logos, no watermark.`;
+}
+
+function preCtaVictimSupportImagePrompt(sceneText: string) {
+  const scene = stripToSingleLine(sceneText, 260);
+  return `${scene}. Trustworthy crypto investigation office, analyst team reviewing blockchain wallet traces on secure dashboards, victim support specialist guiding a case intake, cinematic documentary realism, vertical 9:16, no text, no letters, no logos, no watermark.`;
 }
 
 function extractJsonObject(raw: string) {
@@ -103,9 +125,7 @@ function normalizeScriptPayload(payload: any, topic: string): GeneratedScript {
         }))
     : [];
 
-  const preCtaText =
-    stripToSingleLine(String(payload?.preCtaScene?.text || ''), 260) ||
-    'If you already sent crypto to scammers, check the link in our bio or comments to report the scam and submit your case for professional recovery support.';
+  const preCtaText = PRE_CTA_VICTIM_SUPPORT_MESSAGE;
 
   const cta =
     stripToSingleLine(String(payload?.cta || ''), 200) ||
@@ -118,9 +138,7 @@ function normalizeScriptPayload(payload: any, topic: string): GeneratedScript {
     scenes,
     preCtaScene: {
       text: preCtaText,
-      imagePrompt:
-        stripToSingleLine(String(payload?.preCtaScene?.imagePrompt || ''), 260) ||
-        sceneImagePromptFromNarration(preCtaText, topic),
+      imagePrompt: preCtaVictimSupportImagePrompt(preCtaText),
     },
     cta,
     caption: stripToSingleLine(String(payload?.caption || ''), 240),
@@ -149,10 +167,10 @@ Return JSON exactly as:
 
 Rules:
 - Use one topic only: do not introduce other incidents, coins, scams, or side stories.
-- Hook + scenes + preCtaScene + cta must all stay on this exact topic.
+- Hook + scenes + cta must all stay on this exact topic.
 - scenes: 6-8 entries, factual, dynamic, web-style informational details (names, amounts, timeline, mechanics, impact) tied to topic; avoid generic filler language.
 - scenes must contain no CTA language (no follow/like/share/comment/link prompts).
-- preCtaScene: one dedicated, professional victim-support scene that appears immediately before final CTA and says victims can use link in bio/comments to report scam and submit case for recovery investigation.
+- preCtaScene: one dedicated victim-assistance scene that appears immediately before final CTA, is NOT about the main topic, and tells viewers who sent crypto to scammers to use the link in bio/comments to report scam + submit case so investigators can help recover lost crypto.
 - cta: exactly one final CTA line only, natural and professional, asking viewers to like, share, and follow, tied to this topic.
 - imagePrompt must visually describe the same narration moment as its scene text, cinematic vertical 9:16, no text/watermarks/logos.
 - hashtags: exactly 5.`
@@ -171,7 +189,7 @@ export async function generateFacebookComment(title: string, caption: string, to
           {
             role: 'system',
             content:
-              'Write one professional Facebook comment in 45-85 words. Keep it engaging and tied tightly to the single topic, title, and caption. No hashtags, no markdown, no generic filler. Include a short engagement line. Do not mention victim reporting unless a link is provided by the caller.',
+              'Write one professional Facebook comment in 55-95 words. Keep it engaging and primarily focused on the exact video topic, title, and caption. Include clear prompts to like this video, share it with others, and follow the page. No hashtags, no markdown, and no mention of pricing/fees. Do not mention victim reporting unless a link is provided by the caller.',
           },
           {
             role: 'user',
@@ -187,11 +205,35 @@ Caption: ${caption}`,
       }
     );
 
-    return stripToSingleLine(String(response.data.choices?.[0]?.message?.content || ''), 520);
+    const raw = stripToSingleLine(String(response.data.choices?.[0]?.message?.content || ''), 520);
+    const cleaned = raw
+      .replace(/\bno upfront fees?\b/gi, '')
+      .replace(/\bwithout upfront fees?\b/gi, '')
+      .replace(/\b(if you sent crypto to scammers|report (the )?crypto scam|submit your case|recovery options|link in (our )?(bio|comments?))\b/gi, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+
+    const withTopic = cleaned || `This update on ${topic} highlights key details people need to watch closely.`;
+    const engagementNudges = 'If this breakdown helped, like this video, share it with others, and follow our page for more verified scam updates.';
+    const merged = `${withTopic} ${engagementNudges}`.replace(/\s{2,}/g, ' ').trim();
+    return stripToSingleLine(merged, 520);
   });
 
   if (!appendUrl) return base;
-  return `${base} If you already sent crypto to scammers, use this link to report the scam and submit your case for recovery review: ${appendUrl}`;
+  return `${base} If you sent crypto to scammers, click this link to report the crypto scam and submit your case so investigators can review recovery options: ${appendUrl}`;
+}
+
+function chooseRandomBackgroundTrack() {
+  if (BACKGROUND_TRACKS.length <= 1) {
+    const only = BACKGROUND_TRACKS[0];
+    lastBackgroundTrackUrl = only?.url || null;
+    return only;
+  }
+
+  const candidates = BACKGROUND_TRACKS.filter((track) => track.url !== lastBackgroundTrackUrl);
+  const selected = candidates[Math.floor(Math.random() * candidates.length)] || BACKGROUND_TRACKS[0];
+  lastBackgroundTrackUrl = selected.url;
+  return selected;
 }
 
 function normalizeWordTimings(raw: any): VoiceTimingWord[] {
@@ -392,13 +434,17 @@ export async function assembleVideo(jobId: string, audioPath: string, imagePaths
   }
 
   const subtitleEvents = buildSubtitleEventsFromWords(meta.words);
+  const backgroundTrack = chooseRandomBackgroundTrack();
   console.info(`[render:${jobId}] subtitle_format=srt subtitle_events=${subtitleEvents.length}`);
+  console.info(`[render:${jobId}] background_track_selected title=${backgroundTrack.title} volume=${backgroundTrack.volume}`);
 
   const remote = await renderVideoViaGitHubActions({
     jobId,
     audioPath,
     imagePaths,
     subtitleEvents,
+    backgroundMusicUrl: backgroundTrack.url,
+    backgroundMusicVolume: backgroundTrack.volume,
     voiceoverMeta: {
       voiceId: meta.voiceId,
       timingSource: meta.timingSource,

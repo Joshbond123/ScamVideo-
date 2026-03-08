@@ -11,6 +11,8 @@ type RenderRequest = {
   audioPath: string;
   imagePaths: string[];
   subtitleEvents: SubtitleEvent[];
+  backgroundMusicUrl?: string;
+  backgroundMusicVolume?: number;
   voiceoverMeta: { voiceId: string; timingSource: string; durationSec: number };
 };
 
@@ -328,6 +330,8 @@ export async function renderVideoViaGitHubActions(payload: RenderRequest) {
     audio_path: uploadedAudio,
     image_paths_json: JSON.stringify(uploadedImages),
     subtitle_events_json: JSON.stringify(payload.subtitleEvents || []),
+    background_music_url: String(payload.backgroundMusicUrl || ''),
+    background_music_volume: String(payload.backgroundMusicVolume ?? 0.1),
     output_path: outputPath,
     voice_duration_sec: String(payload.voiceoverMeta?.durationSec || 0),
   };
