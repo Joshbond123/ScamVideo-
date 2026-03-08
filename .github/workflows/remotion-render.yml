@@ -1,0 +1,156 @@
+name: remotion-render
+run-name: Render ${{ github.event.inputs.job_id || github.event.client_payload.job_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: Render job id
+        required: true
+        type: string
+      supabase_url:
+        description: Supabase project URL
+        required: true
+        type: string
+      supabase_service_role_key:
+        description: Supabase service role key
+        required: true
+        type: string
+      bucket:
+        description: Supabase storage bucket
+        required: true
+        type: string
+      audio_path:
+        description: Audio object path
+        required: true
+        type: string
+      image_paths_json:
+        description: JSON array of image object paths
+        required: true
+        type: string
+      subtitle_events_json:
+        description: JSON subtitle events
+        required: true
+        type: string
+      output_path:
+        description: Output object path
+        required: true
+        type: string
+      voice_duration_sec:
+        description: Voice duration in seconds
+        required: true
+        type: string
+  repository_dispatch:
+    types: [render_video]
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm install --no-save --legacy-peer-deps remotion@4.0.366 @remotion/cli@4.0.366 @remotion/bundler@4.0.366 @remotion/renderer@4.0.366 react@18.3.1 react-dom@18.3.1
+
+      - name: Download render assets and build input props
+        env:
+          SUPABASE_URL: ${{ github.event.inputs.supabase_url || github.event.client_payload.supabase_url }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ github.event.inputs.supabase_service_role_key || github.event.client_payload.supabase_service_role_key }}
+          BUCKET: ${{ github.event.inputs.bucket || github.event.client_payload.bucket }}
+          AUDIO_PATH: ${{ github.event.inputs.audio_path || github.event.client_payload.audio_path }}
+          IMAGE_PATHS_JSON: ${{ github.event.inputs.image_paths_json || github.event.client_payload.image_paths_json }}
+          SUBTITLE_EVENTS_JSON: ${{ github.event.inputs.subtitle_events_json || github.event.client_payload.subtitle_events_json }}
+          VOICE_DURATION_SEC: ${{ github.event.inputs.voice_duration_sec || github.event.client_payload.voice_duration_sec }}
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+
+          const base = process.env.SUPABASE_URL.replace(/\/$/, '');
+          const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+          const bucket = process.env.BUCKET;
+          const audioPath = process.env.AUDIO_PATH;
+          const imagePaths = JSON.parse(process.env.IMAGE_PATHS_JSON || '[]');
+          const subtitleEvents = JSON.parse(process.env.SUBTITLE_EVENTS_JSON || '[]');
+          const voiceDurationSec = Math.max(1, Number(process.env.VOICE_DURATION_SEC || 1));
+
+          if (!audioPath || !imagePaths.length) {
+            throw new Error('audio_path and image_paths_json are required');
+          }
+
+          const dl = async (remote, local) => {
+            const res = await fetch(`${base}/storage/v1/object/${bucket}/${remote}`, {
+              headers: {apikey: key, Authorization: `Bearer ${key}`},
+            });
+            if (!res.ok) {
+              throw new Error(`Download failed ${remote}: ${res.status} ${await res.text()}`);
+            }
+            const buf = Buffer.from(await res.arrayBuffer());
+            fs.mkdirSync(path.dirname(local), {recursive: true});
+            fs.writeFileSync(local, buf);
+          };
+
+          (async () => {
+            await dl(audioPath, 'public/render-assets/audio.mp3');
+            const localImages = [];
+            for (let i = 0; i < imagePaths.length; i += 1) {
+              const localPath = `public/render-assets/scene_${i}.png`;
+              await dl(imagePaths[i], localPath);
+              localImages.push(localPath);
+            }
+
+            const normalizedSubtitles = subtitleEvents
+              .map((event) => ({
+                text: String(event.text || '').replace(/\s+/g, ' ').trim().toUpperCase(),
+                start: Math.max(0, Number(event.start || 0)),
+                end: Math.max(0.05, Number(event.end || 0)),
+              }))
+              .filter((event) => event.text);
+
+            fs.writeFileSync(
+              'render-input.json',
+              JSON.stringify(
+                {
+                  audioPath: 'render-assets/audio.mp3',
+                  imagePaths: localImages.map((x) => x.replace(/^public/, '')),
+                  subtitleEvents: normalizedSubtitles,
+                  voiceDurationSec,
+                },
+                null,
+                2,
+              ),
+            );
+          })().catch((error) => {
+            console.error(error);
+            process.exit(1);
+          });
+          NODE
+
+      - name: Render MP4 with Remotion
+        run: |
+          DURATION_FRAMES=$(node -e "const p=require('./render-input.json'); console.log(Math.max(30, Math.ceil((Number(p.voiceDurationSec||1)+0.2)*30)));")
+          npx remotion render remotion/index.ts ShortVideo render.mp4 --props="$(cat render-input.json)" --codec=h264 --pixel-format=yuv420p --concurrency=2 --frames=0-$((DURATION_FRAMES-1)) --public-dir=public
+
+      - name: Validate output exists
+        run: test -s render.mp4
+
+      - name: Upload rendered video to Supabase storage
+        env:
+          SUPABASE_URL: ${{ github.event.inputs.supabase_url || github.event.client_payload.supabase_url }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ github.event.inputs.supabase_service_role_key || github.event.client_payload.supabase_service_role_key }}
+          BUCKET: ${{ github.event.inputs.bucket || github.event.client_payload.bucket }}
+          OUTPUT_PATH: ${{ github.event.inputs.output_path || github.event.client_payload.output_path }}
+        run: |
+          curl -sS --fail-with-body -X POST "${SUPABASE_URL}/storage/v1/object/${BUCKET}/${OUTPUT_PATH}" \
+            -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+            -H "x-upsert: true" \
+            -H "Content-Type: video/mp4" \
+            --data-binary @render.mp4
