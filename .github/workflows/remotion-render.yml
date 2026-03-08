@@ -54,6 +54,11 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
       - name: Install dependencies
         run: |
           npm ci
@@ -137,6 +142,18 @@ jobs:
         run: |
           DURATION_FRAMES=$(node -e "const p=require('./render-input.json'); console.log(Math.max(30, Math.ceil((Number(p.voiceDurationSec||1)+0.2)*30)));")
           npx remotion render remotion/index.ts ShortVideo render.mp4 --props="$(cat render-input.json)" --codec=h264 --pixel-format=yuv420p --concurrency=2 --frames=0-$((DURATION_FRAMES-1)) --public-dir=public
+
+      - name: Re-encode MP4 for Facebook compatibility
+        run: |
+          ffmpeg -y -i render.mp4 \
+            -map 0:v:0 -map 0:a:0? \
+            -r 30 \
+            -vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,format=yuv420p" \
+            -c:v libx264 -preset medium -profile:v high -level 4.1 -pix_fmt yuv420p \
+            -movflags +faststart \
+            -c:a aac -b:a 192k -ar 48000 -ac 2 \
+            -shortest render_facebook.mp4
+          mv render_facebook.mp4 render.mp4
 
       - name: Validate output exists
         run: test -s render.mp4
