@@ -5,6 +5,7 @@ import {
   Audio,
   Img,
   Sequence,
+  staticFile,
   interpolate,
   spring,
   useCurrentFrame,
@@ -52,6 +53,7 @@ export const ShortVideo: React.FC<RenderProps> = ({audioPath, imagePaths, subtit
   const {fps, durationInFrames} = useVideoConfig();
 
   const safeImages = imagePaths.length ? imagePaths : ['https://dummyimage.com/1080x1920/000/fff.png&text=SCAM+ALERT'];
+  const resolveAsset = (src: string) => (src.startsWith('http://') || src.startsWith('https://') ? src : staticFile(src.replace(/^\/+/, '')));
   const sceneFrames = Math.max(1, Math.floor(durationInFrames / safeImages.length));
   const nowSec = frame / fps;
 
@@ -89,13 +91,13 @@ export const ShortVideo: React.FC<RenderProps> = ({audioPath, imagePaths, subtit
         return (
           <Sequence key={`${src}-${idx}`} from={start} durationInFrames={sceneFrames + 8}>
             <AbsoluteFill style={{opacity}}>
-              <Img src={src} style={{width: '100%', height: '100%', objectFit: 'cover'}} />
+              <Img src={resolveAsset(src)} style={{width: '100%', height: '100%', objectFit: 'cover'}} />
             </AbsoluteFill>
           </Sequence>
         );
       })}
 
-      {audioPath ? <Audio src={audioPath} /> : null}
+      {audioPath ? <Audio src={resolveAsset(audioPath)} /> : null}
 
       <AbsoluteFill
         style={{

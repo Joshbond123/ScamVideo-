@@ -118,7 +118,7 @@ jobs:
               'render-input.json',
               JSON.stringify(
                 {
-                  audioPath: '/render-assets/audio.mp3',
+                  audioPath: 'render-assets/audio.mp3',
                   imagePaths: localImages.map((x) => x.replace(/^public/, '')),
                   subtitleEvents: normalizedSubtitles,
                   voiceDurationSec,
