@@ -129,11 +129,11 @@ jobs:
 
           # Build short, mobile-readable viral caption chunks (1-2 lines) from
           # timing events while staying synchronized with voiceover progression.
-          MAX_WORDS = 4
-          MAX_CHARS = 28
+          MAX_WORDS = 3
+          MAX_CHARS = 20
           MAX_GAP = 0.45
-          MIN_DUR = 0.75
-          MAX_DUR = 2.20
+          MIN_DUR = 0.85
+          MAX_DUR = 1.80
 
           chunked = []
           cur_words = []
@@ -144,7 +144,7 @@ jobs:
             if not cur_words or cur_start is None or cur_end is None:
               return [], None, None
             end = max(cur_start + MIN_DUR, min(cur_end, cur_start + MAX_DUR))
-            chunked.append((cur_start, end, ' '.join(cur_words)))
+            chunked.append((cur_start, end, ' '.join(cur_words).upper()))
             return [], None, None
 
           for start, end, txt in normalized:
@@ -209,7 +209,7 @@ jobs:
 
           W, H = 1080, 1920
           FPS = 30
-          SUBTITLE_Y = int(H * 0.66)
+          SUBTITLE_Y = int(H * 0.60)
 
           with open('scene_count.txt', 'r', encoding='utf-8') as f:
             scene_count = int(f.read().strip())
@@ -249,12 +249,12 @@ jobs:
               clean = ' '
             return TextClip(
               text=clean,
-              font_size=68,
+              font_size=66,
               color='white',
               stroke_color='black',
-              stroke_width=4,
+              stroke_width=5,
               method='caption',
-              size=(760, None)
+              size=(660, None)
             )
 
           subtitles = SubtitlesClip('subtitles.srt', make_textclip=subtitle_generator).with_position(('center', SUBTITLE_Y))
