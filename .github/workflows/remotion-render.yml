@@ -57,7 +57,7 @@ jobs:
       - name: Install dependencies
         run: |
           npm ci
-          npm install --no-save --legacy-peer-deps remotion@4.0.366 @remotion/bundler@4.0.366 @remotion/renderer@4.0.366 react@18.3.1 react-dom@18.3.1
+          npm install --no-save --legacy-peer-deps remotion@4.0.366 @remotion/cli@4.0.366 @remotion/bundler@4.0.366 @remotion/renderer@4.0.366 react@18.3.1 react-dom@18.3.1
 
       - name: Download render assets and build input props
         env:
