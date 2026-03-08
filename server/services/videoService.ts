@@ -34,11 +34,11 @@ type VoiceoverMeta = {
 
 const UNREAL_VOICES = ['Oliver', 'Noah', 'Ethan', 'Daniel'];
 const BACKGROUND_TRACKS: BackgroundTrack[] = [
-  { title: 'Cyber Pulse', url: 'https://assets.mixkit.co/music/preview/mixkit-tech-house-vibes-130.mp3', volume: 0.12 },
-  { title: 'Urban Momentum', url: 'https://assets.mixkit.co/music/preview/mixkit-hip-hop-02-738.mp3', volume: 0.1 },
-  { title: 'Alert Beat', url: 'https://assets.mixkit.co/music/preview/mixkit-raising-me-higher-34.mp3', volume: 0.11 },
-  { title: 'Pulse Drive', url: 'https://assets.mixkit.co/music/preview/mixkit-driving-ambition-32.mp3', volume: 0.1 },
-  { title: 'Trend Snap', url: 'https://assets.mixkit.co/music/preview/mixkit-modern-technology-133.mp3', volume: 0.11 },
+  { title: 'Helix Drive 1', url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3', volume: 0.08 },
+  { title: 'Helix Drive 2', url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3', volume: 0.08 },
+  { title: 'Helix Drive 3', url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3', volume: 0.08 },
+  { title: 'Helix Drive 4', url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-4.mp3', volume: 0.08 },
+  { title: 'Helix Drive 5', url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-5.mp3', volume: 0.08 },
 ];
 let lastBackgroundTrackUrl: string | null = null;
 const voiceMetaByJob = new Map<string, VoiceoverMeta>();
