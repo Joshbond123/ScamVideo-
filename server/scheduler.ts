@@ -510,13 +510,15 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
     const scenePlan = [
       ...scriptData.scenes,
       scriptData.preCtaScene,
-      { text: scriptData.cta, imagePrompt: 'Professional anti-scam awareness closing frame, cyber safety visual, cinematic vertical 9:16, no text, no logo' },
+      { text: scriptData.cta, imagePrompt: '' },
     ].filter(Boolean);
 
     const imagePaths: string[] = [];
     await withStage(schedule, 'video_scene_image_generation', async () => {
       for (let i = 0; i < scenePlan.length; i++) {
-        const prompt = `${scenePlan[i].imagePrompt}. Vertical 9:16 composition. No text, words, watermarks, logos.`;
+        const narration = String(scenePlan[i]?.text || '').replace(/\s+/g, ' ').trim();
+        const promptFromNarration = `${narration}. Visualize this exact narration moment from topic "${topic}". Cinematic documentary realism, vertical 9:16, no text, no letters, no logos, no watermark.`;
+        const prompt = `${promptFromNarration} ${String(scenePlan[i]?.imagePrompt || '').trim()}`.trim();
         const imgPath = await generateImage(prompt, jobId, i);
         imagePaths.push(imgPath);
       }
