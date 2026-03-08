@@ -35,7 +35,7 @@ const STAGE_TIMEOUTS_MS: Record<string, number> = {
   video_scene_image_generation: 8 * 60_000,
   post_image_generation_with_overlay: 4 * 60_000,
   video_voiceover_generation: 4 * 60_000,
-  video_render_moviepy: 20 * 60_000,
+  video_render_remotion: 20 * 60_000,
   video_host_catbox: 3 * 60_000,
   post_host_catbox: 3 * 60_000,
   video_publish_facebook: 3 * 60_000,
@@ -522,7 +522,7 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
       }
     });
 
-    const videoPath = await withStage(schedule, 'video_render_moviepy', async () =>
+    const videoPath = await withStage(schedule, 'video_render_remotion', async () =>
       assembleVideo(
         jobId,
         audioPath,
