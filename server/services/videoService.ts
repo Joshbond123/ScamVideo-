@@ -34,11 +34,11 @@ type VoiceoverMeta = {
 
 const UNREAL_VOICES = ['Oliver', 'Noah', 'Ethan', 'Daniel'];
 const BACKGROUND_TRACKS: BackgroundTrack[] = [
-  { title: 'Helix Drive 1', url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3', volume: 0.08 },
-  { title: 'Helix Drive 2', url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3', volume: 0.08 },
-  { title: 'Helix Drive 3', url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3', volume: 0.08 },
-  { title: 'Helix Drive 4', url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-4.mp3', volume: 0.08 },
-  { title: 'Helix Drive 5', url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-5.mp3', volume: 0.08 },
+  { title: 'Pulse Cut 3s', url: 'https://samplelib.com/lib/preview/mp3/sample-3s.mp3', volume: 0.08 },
+  { title: 'Pulse Cut 6s', url: 'https://samplelib.com/lib/preview/mp3/sample-6s.mp3', volume: 0.08 },
+  { title: 'Pulse Cut 12s', url: 'https://samplelib.com/lib/preview/mp3/sample-12s.mp3', volume: 0.08 },
+  { title: 'Pulse Cut 15s', url: 'https://samplelib.com/lib/preview/mp3/sample-15s.mp3', volume: 0.08 },
+  { title: 'Pulse Cut 9s', url: 'https://samplelib.com/lib/preview/mp3/sample-9s.mp3', volume: 0.08 },
 ];
 let lastBackgroundTrackUrl: string | null = null;
 const voiceMetaByJob = new Map<string, VoiceoverMeta>();
