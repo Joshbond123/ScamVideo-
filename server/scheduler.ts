@@ -35,7 +35,7 @@ const STAGE_TIMEOUTS_MS: Record<string, number> = {
   video_scene_image_generation: 8 * 60_000,
   post_image_generation_with_overlay: 4 * 60_000,
   video_voiceover_generation: 4 * 60_000,
-  video_render_moviepy: 20 * 60_000,
+  video_render_remotion: 20 * 60_000,
   video_host_catbox: 3 * 60_000,
   post_host_catbox: 3 * 60_000,
   video_publish_facebook: 3 * 60_000,
@@ -118,12 +118,12 @@ async function withStage<T>(schedule: Schedule, stage: string, fn: () => Promise
   const started = Date.now();
   const timeoutMs = STAGE_TIMEOUTS_MS[stage] ?? DEFAULT_STAGE_TIMEOUT_MS;
   await touchHeartbeat(schedule, stage);
-  await logEvent(schedule.type, 'info', `stage_start:${stage} timeoutMs=${timeoutMs}`, schedule.niche);
+  await logEvent(schedule.type, 'info', `stage_start id=${schedule.id} stage=${stage} timeoutMs=${timeoutMs}`, schedule.niche);
   try {
     const out = await runWithTimeout(fn, timeoutMs, `stage:${stage}`);
     const elapsed = Date.now() - started;
     await touchHeartbeat(schedule, stage);
-    await logEvent(schedule.type, 'success', `stage_end:${stage} durationMs=${elapsed}`, schedule.niche);
+    await logEvent(schedule.type, 'success', `stage_end id=${schedule.id} stage=${stage} durationMs=${elapsed}`, schedule.niche);
     return out;
   } catch (error: any) {
     const elapsed = Date.now() - started;
@@ -131,7 +131,7 @@ async function withStage<T>(schedule: Schedule, stage: string, fn: () => Promise
     await logEvent(
       schedule.type,
       'error',
-      `stage_fail:${stage} durationMs=${elapsed} message=${e.message}${e.status ? ` status=${e.status}` : ''}${e.response ? ` response=${JSON.stringify(e.response)}` : ''}`,
+      `stage_fail id=${schedule.id} stage=${stage} durationMs=${elapsed} message=${e.message}${e.status ? ` status=${e.status}` : ''}${e.response ? ` response=${JSON.stringify(e.response)}` : ''}`,
       schedule.niche
     );
     throw error;
@@ -259,12 +259,14 @@ async function processDueSchedules() {
 
     const videoSchedules = await readJson<Schedule[]>(PATHS.schedules.video);
     const postSchedules = await readJson<Schedule[]>(PATHS.schedules.post);
-    const pending = [...videoSchedules, ...postSchedules]
+    const allSchedules = [...videoSchedules, ...postSchedules];
+    const pending = allSchedules
       .filter((s) => s.status === 'pending')
       .sort((a, b) => getScheduleSortTime(a) - getScheduleSortTime(b));
+    const generating = allSchedules.filter((s) => s.status === 'generating');
 
     if (!pending.length) {
-      await logEvent('system', 'info', 'scheduler_tick:no_pending_schedules');
+      await logEvent('system', 'info', `scheduler_tick:no_pending_schedules generating=${generating.length}`);
       return;
     }
 
@@ -286,21 +288,58 @@ async function processDueSchedules() {
   }
 }
 
-async function computeNextWakeDelayMs(): Promise<number | null> {
+async function computeNextWakeDelayMs(): Promise<{ delayMs: number | null; reason: string }> {
   const [videoSchedules, postSchedules] = await Promise.all([
     readJson<Schedule[]>(PATHS.schedules.video),
     readJson<Schedule[]>(PATHS.schedules.post),
   ]);
 
-  const pending = [...videoSchedules, ...postSchedules].filter((s) => s.status === 'pending');
-  if (!pending.length) return null;
+  const all = [...videoSchedules, ...postSchedules];
+  const pending = all.filter((s) => s.status === 'pending');
+  const generating = all.filter((s) => s.status === 'generating');
 
   const now = Date.now();
-  const nextTs = Math.min(...pending.map((s) => new Date(s.scheduledAt).getTime()));
-  if (!Number.isFinite(nextTs)) return SCHEDULER_TICK_MS;
 
-  const delay = Math.max(0, nextTs - now);
-  return Math.min(Math.max(delay, 1000), MAX_SLEEP_MS);
+  let pendingDelayMs: number | null = null;
+  if (pending.length) {
+    const nextPendingTs = Math.min(...pending.map((s) => new Date(s.scheduledAt).getTime()));
+    if (Number.isFinite(nextPendingTs)) {
+      pendingDelayMs = Math.min(Math.max(Math.max(0, nextPendingTs - now), 1000), MAX_SLEEP_MS);
+    } else {
+      pendingDelayMs = SCHEDULER_TICK_MS;
+    }
+  }
+
+  let generatingDelayMs: number | null = null;
+  if (generating.length) {
+    const staleDeadlines = generating.map((s) => {
+      const heartbeatMs = new Date(s.lastHeartbeatAt || s.startedAt || s.createdAt || s.scheduledAt).getTime();
+      if (!Number.isFinite(heartbeatMs)) return now + SCHEDULER_TICK_MS;
+      return heartbeatMs + STALE_GENERATING_MS;
+    });
+    const nearestDeadline = Math.min(...staleDeadlines);
+    generatingDelayMs = Math.min(
+      Math.max(1000, Math.max(0, nearestDeadline - now)),
+      SCHEDULER_TICK_MS
+    );
+  }
+
+  if (pendingDelayMs == null && generatingDelayMs == null) {
+    return { delayMs: null, reason: 'idle' };
+  }
+
+  if (pendingDelayMs == null) {
+    return { delayMs: generatingDelayMs, reason: `monitor_generating:${generating.length}` };
+  }
+
+  if (generatingDelayMs == null) {
+    return { delayMs: pendingDelayMs, reason: `next_pending:${pending.length}` };
+  }
+
+  return {
+    delayMs: Math.min(pendingDelayMs, generatingDelayMs),
+    reason: `next_pending:${pending.length}|monitor_generating:${generating.length}`,
+  };
 }
 
 async function scheduleNextWake() {
@@ -309,12 +348,13 @@ async function scheduleNextWake() {
     schedulerTimer = null;
   }
 
-  const delayMs = await computeNextWakeDelayMs();
+  const { delayMs, reason } = await computeNextWakeDelayMs();
   if (delayMs == null) {
-    await logEvent('system', 'info', 'scheduler_sleep:no_pending_jobs');
+    await logEvent('system', 'info', 'scheduler_sleep:no_pending_or_generating_jobs');
     return;
   }
 
+  await logEvent('system', 'info', `scheduler_wake_scheduled delayMs=${delayMs} reason=${reason}`);
   schedulerTimer = setTimeout(() => {
     processDueSchedules()
       .then(() => scheduleNextWake())
@@ -354,12 +394,15 @@ export async function runJob(schedule: Schedule) {
   }
 
   await logEvent(schedule.type, 'info', `job_start id=${schedule.id} scheduledAt=${schedule.scheduledAt}`, schedule.niche);
+  await logEvent(schedule.type, 'info', `job_bootstrap id=${schedule.id} type=${schedule.type}`, schedule.niche);
 
   const heartbeatTimer = setInterval(() => {
     touchHeartbeat(schedule).catch((error) => {
       console.warn(`Failed to update heartbeat for ${schedule.id}:`, error?.message || error);
     });
   }, HEARTBEAT_INTERVAL_MS);
+
+  let terminalState: 'posted' | 'failed' | null = null;
 
   try {
     await runWithTimeout(async () => {
@@ -394,6 +437,7 @@ export async function runJob(schedule: Schedule) {
       currentStage: 'completed',
       lastHeartbeatAt: new Date().toISOString(),
     });
+    terminalState = 'posted';
     await logEvent(schedule.type, 'success', `job_success id=${schedule.id}`, schedule.niche);
     await logEvent(schedule.type, 'info', `job_terminal_state id=${schedule.id} state=posted publishedAt=${new Date().toISOString()}`, schedule.niche);
 
@@ -423,6 +467,7 @@ export async function runJob(schedule: Schedule) {
       currentStage: 'failed',
       lastHeartbeatAt: new Date().toISOString(),
     });
+    terminalState = 'failed';
     await logEvent(
       schedule.type,
       'error',
@@ -431,6 +476,21 @@ export async function runJob(schedule: Schedule) {
     );
     await logEvent(schedule.type, 'info', `job_terminal_state id=${schedule.id} state=failed failedAt=${new Date().toISOString()}`, schedule.niche);
   } finally {
+    clearInterval(heartbeatTimer);
+
+    if (!terminalState) {
+      try {
+        await setScheduleStatusWithVerification(schedule.id, schedule.type, 'failed', {
+          failedAt: new Date().toISOString(),
+          errorMessage: 'Job exited unexpectedly without terminal state; forced fail-safe terminal transition.',
+          currentStage: 'failed',
+          lastHeartbeatAt: new Date().toISOString(),
+        });
+        await logEvent(schedule.type, 'error', `job_forced_terminal_fail id=${schedule.id} reason=missing_terminal_state`, schedule.niche);
+      } catch (finalizeError: any) {
+        console.error(`Failed to enforce terminal state for ${schedule.id}:`, finalizeError?.message || finalizeError);
+      }
+    }
   }
 }
 
@@ -450,19 +510,21 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
     const scenePlan = [
       ...scriptData.scenes,
       scriptData.preCtaScene,
-      { text: scriptData.cta, imagePrompt: 'Professional anti-scam awareness closing frame, cyber safety visual, cinematic vertical 9:16, no text, no logo' },
+      { text: scriptData.cta, imagePrompt: '' },
     ].filter(Boolean);
 
     const imagePaths: string[] = [];
     await withStage(schedule, 'video_scene_image_generation', async () => {
       for (let i = 0; i < scenePlan.length; i++) {
-        const prompt = `${scenePlan[i].imagePrompt}. Vertical 9:16 composition. No text, words, watermarks, logos.`;
+        const narration = String(scenePlan[i]?.text || '').replace(/\s+/g, ' ').trim();
+        const promptFromNarration = `${narration}. Visualize this exact narration moment from topic "${topic}". Cinematic documentary realism, vertical 9:16, no text, no letters, no logos, no watermark.`;
+        const prompt = `${promptFromNarration} ${String(scenePlan[i]?.imagePrompt || '').trim()}`.trim();
         const imgPath = await generateImage(prompt, jobId, i);
         imagePaths.push(imgPath);
       }
     });
 
-    const videoPath = await withStage(schedule, 'video_render_moviepy', async () =>
+    const videoPath = await withStage(schedule, 'video_render_remotion', async () =>
       assembleVideo(
         jobId,
         audioPath,

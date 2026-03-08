@@ -45,7 +45,7 @@ async function readConfigValue(name: string) {
 async function getConfig() {
   const repo = (process.env.GITHUB_RENDER_REPO || process.env.RENDER_REPO || '').trim() || await readConfigValue('GITHUB_RENDER_REPO');
   const token = (process.env.GITHUB_PAT || process.env.RENDER_GITHUB_PAT || '').trim() || await readConfigValue('GITHUB_PAT');
-  const workflow = (process.env.GITHUB_RENDER_WORKFLOW || 'moviepy-render.yml').trim();
+  const workflow = (process.env.GITHUB_RENDER_WORKFLOW || 'remotion-render.yml').trim();
   const ref = (process.env.GITHUB_RENDER_REF || 'main').trim();
   const bucket = (process.env.SUPABASE_MEDIA_BUCKET || 'temp-media').trim();
   const supabaseUrl = await readConfigValue('SUPABASE_URL');
@@ -119,7 +119,7 @@ function pickWorkflow(configuredWorkflow: string, workflows: WorkflowRef[]) {
   });
   if (byConfigured) return byConfigured;
 
-  const preferred = ['moviepy-render.yml', 'render-dispatch.yml', 'video-render-dispatch.yml', 'ffmpeg-render.yml'];
+  const preferred = ['remotion-render.yml'];
   for (const file of preferred) {
     const found = workflows.find((w) => (w.path.split('/').pop() || '').toLowerCase() === file);
     if (found) return found;
@@ -138,7 +138,7 @@ function buildDispatchCandidates(configuredWorkflow: string, workflows: Workflow
 
   pushUnique(pickWorkflow(configuredWorkflow, workflows));
 
-  const preferred = ['moviepy-render.yml', 'render-dispatch.yml', 'video-render-dispatch.yml', 'ffmpeg-render.yml', 'gstreamer-render.yml'];
+  const preferred = ['remotion-render.yml'];
   for (const file of preferred) {
     pushUnique(workflows.find((w) => (w.path.split('/').pop() || '').toLowerCase() === file));
   }

@@ -29,6 +29,22 @@ type VoiceoverMeta = {
 const UNREAL_VOICES = ['Oliver', 'Noah', 'Ethan', 'Daniel'];
 const voiceMetaByJob = new Map<string, VoiceoverMeta>();
 
+function stripToSingleLine(value: string, maxLen: number) {
+  const compact = String(value || '').replace(/\s+/g, ' ').trim();
+  return compact.slice(0, maxLen).trim();
+}
+
+function looksLikeCta(text: string) {
+  const t = String(text || '').toLowerCase();
+  return /(follow|like|share|subscribe|comment below|link in bio|check the link|report your case)/.test(t);
+}
+
+function sceneImagePromptFromNarration(sceneText: string, topic: string) {
+  const scene = stripToSingleLine(sceneText, 260);
+  const focusedTopic = stripToSingleLine(topic, 120);
+  return `${scene}. Visualize this exact moment from the topic: ${focusedTopic}. Documentary realism, cinematic vertical 9:16, high detail, natural lighting, no text, no letters, no logos, no watermark.`;
+}
+
 function extractJsonObject(raw: string) {
   const trimmed = raw.trim();
   try {
@@ -77,33 +93,69 @@ export async function rewriteTopicForVideo(niche: string, topic: string): Promis
 function normalizeScriptPayload(payload: any, topic: string): GeneratedScript {
   const scenes = Array.isArray(payload?.scenes)
     ? payload.scenes
-        .map((s: any) => ({ text: String(s?.text || '').trim(), imagePrompt: String(s?.imagePrompt || '').trim() }))
-        .filter((s: any) => s.text && s.imagePrompt)
+        .map((s: any) => ({ text: stripToSingleLine(String(s?.text || ''), 220), imagePrompt: stripToSingleLine(String(s?.imagePrompt || ''), 260) }))
+        .filter((s: any) => s.text)
+        .filter((s: any) => !looksLikeCta(s.text))
+        .slice(0, 8)
+        .map((s: any) => ({
+          text: s.text,
+          imagePrompt: s.imagePrompt || sceneImagePromptFromNarration(s.text, topic),
+        }))
     : [];
 
+  const preCtaText =
+    stripToSingleLine(String(payload?.preCtaScene?.text || ''), 260) ||
+    'If you already sent crypto to scammers, check the link in our bio or comments to report the scam and submit your case for professional recovery support.';
+
+  const cta =
+    stripToSingleLine(String(payload?.cta || ''), 200) ||
+    'Follow for real-time scam alerts, like this video, and share it to protect more people from this scam.';
+
   return {
-    title: String(payload?.title || topic).trim(),
-    hook: String(payload?.hook || '').trim(),
-    script: String(payload?.script || '').trim(),
-    scenes: scenes.slice(0, 8),
+    title: stripToSingleLine(String(payload?.title || topic), 120),
+    hook: stripToSingleLine(String(payload?.hook || ''), 180),
+    script: stripToSingleLine(String(payload?.script || ''), 1000),
+    scenes,
     preCtaScene: {
-      text:
-        String(payload?.preCtaScene?.text || '').trim() ||
-        'If you already sent crypto to scammers, check our link in bio or pinned comment to report your case and start your recovery review.',
+      text: preCtaText,
       imagePrompt:
-        String(payload?.preCtaScene?.imagePrompt || '').trim() ||
-        'Concerned crypto scam victim speaking with a cybercrime support specialist in a modern office, cinematic lighting, vertical composition, no text',
+        stripToSingleLine(String(payload?.preCtaScene?.imagePrompt || ''), 260) ||
+        sceneImagePromptFromNarration(preCtaText, topic),
     },
-    cta: String(payload?.cta || '').trim() || 'Follow for scam alerts, like this video, and share to protect more people from crypto scams.',
-    caption: String(payload?.caption || '').trim(),
-    hashtags: String(payload?.hashtags || '').trim(),
+    cta,
+    caption: stripToSingleLine(String(payload?.caption || ''), 240),
+    hashtags: stripToSingleLine(String(payload?.hashtags || ''), 120),
   };
 }
 
 export async function generateScript(niche: string, topic: string): Promise<GeneratedScript> {
   const payload = await runCerebrasJson(
     'You create high-retention short-form anti-scam video scripts for Facebook. Return strict JSON only.',
-    `Current date: ${new Date().toISOString()}\nNiche: ${niche}\nTrending topic: ${topic}\n\nReturn JSON exactly as:\n{\n  "title": "",\n  "hook": "",\n  "script": "",\n  "scenes": [{"text":"","imagePrompt":""}],\n  "preCtaScene": {"text":"","imagePrompt":""},\n  "cta": "",\n  "caption": "",\n  "hashtags": ""\n}\n\nRules:\n- scenes: 6-8 entries, each vivid, factual, dynamic, no placeholders.\n- Add one professional preCtaScene specifically telling victims who sent crypto to scammers to check link in bio/comments to report case and recover lost crypto.\n- cta must ask viewers to follow, like, and share.\n- imagePrompt must request cinematic vertical 9:16 visuals and explicitly say no text/watermarks/logos.\n- hashtags: exactly 5.`
+    `Current date: ${new Date().toISOString()}
+Niche: ${niche}
+Single topic (must stay consistent from first second to final frame): ${topic}
+
+Return JSON exactly as:
+{
+  "title": "",
+  "hook": "",
+  "script": "",
+  "scenes": [{"text":"","imagePrompt":""}],
+  "preCtaScene": {"text":"","imagePrompt":""},
+  "cta": "",
+  "caption": "",
+  "hashtags": ""
+}
+
+Rules:
+- Use one topic only: do not introduce other incidents, coins, scams, or side stories.
+- Hook + scenes + preCtaScene + cta must all stay on this exact topic.
+- scenes: 6-8 entries, factual, dynamic, web-style informational details (names, amounts, timeline, mechanics, impact) tied to topic; avoid generic filler language.
+- scenes must contain no CTA language (no follow/like/share/comment/link prompts).
+- preCtaScene: one dedicated, professional victim-support scene that appears immediately before final CTA and says victims can use link in bio/comments to report scam and submit case for recovery investigation.
+- cta: exactly one final CTA line only, natural and professional, asking viewers to like, share, and follow, tied to this topic.
+- imagePrompt must visually describe the same narration moment as its scene text, cinematic vertical 9:16, no text/watermarks/logos.
+- hashtags: exactly 5.`
   );
 
   return normalizeScriptPayload(payload, topic);
@@ -119,11 +171,13 @@ export async function generateFacebookComment(title: string, caption: string, to
           {
             role: 'system',
             content:
-              'Write one concise Facebook comment (35-75 words), factual and engaging, tied to topic/title. Professional tone. No markdown. No hashtags. Mention no upfront fees. Final sentence should guide crypto scam victims to report via provided link if available.',
+              'Write one professional Facebook comment in 45-85 words. Keep it engaging and tied tightly to the single topic, title, and caption. No hashtags, no markdown, no generic filler. Include a short engagement line. Do not mention victim reporting unless a link is provided by the caller.',
           },
           {
             role: 'user',
-            content: `Topic: ${topic}\nTitle: ${title}\nCaption: ${caption}`,
+            content: `Topic: ${topic}
+Title: ${title}
+Caption: ${caption}`,
           },
         ],
       },
@@ -133,11 +187,11 @@ export async function generateFacebookComment(title: string, caption: string, to
       }
     );
 
-    return String(response.data.choices?.[0]?.message?.content || '').trim();
+    return stripToSingleLine(String(response.data.choices?.[0]?.message?.content || ''), 520);
   });
 
   if (!appendUrl) return base;
-  return `${base}\n\nIf you already sent crypto to scammers, use this link to report your case: ${appendUrl}`;
+  return `${base} If you already sent crypto to scammers, use this link to report the scam and submit your case for recovery review: ${appendUrl}`;
 }
 
 function normalizeWordTimings(raw: any): VoiceTimingWord[] {
@@ -330,7 +384,7 @@ export async function generatePostImageWithTitleOverlay(prompt: string, title: s
 }
 
 export async function assembleVideo(jobId: string, audioPath: string, imagePaths: string[], subtitleLines: string[]) {
-  console.info(`[render:${jobId}] render_provider=github_actions_moviepy`);
+  console.info(`[render:${jobId}] render_provider=github_actions_remotion`);
 
   const meta = voiceMetaByJob.get(jobId);
   if (!meta?.words?.length) {
@@ -353,7 +407,7 @@ export async function assembleVideo(jobId: string, audioPath: string, imagePaths
   });
 
   if (!remote?.localOutput) {
-    throw new Error(`[render:${jobId}] render_provider=github_actions_moviepy failed: missing local output`);
+    throw new Error(`[render:${jobId}] render_provider=github_actions_remotion failed: missing local output`);
   }
 
   console.info(`[render:${jobId}] subtitles_burn_step=success output=${remote.outputPath || remote.localOutput} workflow_run=${remote.runUrl || 'n/a'}`);
