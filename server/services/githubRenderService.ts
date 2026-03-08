@@ -148,6 +148,26 @@ function buildDispatchCandidates(configuredWorkflow: string, workflows: Workflow
   return ordered;
 }
 
+function stripUnexpectedWorkflowInputs(inputs: Record<string, string>, message: string): Record<string, string> | null {
+  const match = message.match(/Unexpected inputs provided:\s*\[(.*?)\]/i);
+  if (!match) return null;
+  const names = match[1]
+    .split(',')
+    .map((token) => token.trim().replace(/^"|"$/g, '').replace(/^'|'$/g, ''))
+    .filter(Boolean);
+  if (!names.length) return null;
+
+  const trimmed: Record<string, string> = { ...inputs };
+  let removed = false;
+  for (const key of names) {
+    if (key in trimmed) {
+      delete trimmed[key];
+      removed = true;
+    }
+  }
+  return removed ? trimmed : null;
+}
+
 async function triggerWorkflow(cfg: RenderConfig, jobId: string, inputs: Record<string, string>): Promise<DispatchAttempt> {
   const { token, repo, workflow, ref } = cfg;
   const client = ghClient(token);

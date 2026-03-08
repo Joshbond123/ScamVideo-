@@ -81,6 +81,8 @@ jobs:
           IMAGE_PATHS_JSON: ${{ github.event.inputs.image_paths_json || github.event.client_payload.image_paths_json }}
           SUBTITLE_EVENTS_JSON: ${{ github.event.inputs.subtitle_events_json || github.event.client_payload.subtitle_events_json }}
           VOICE_DURATION_SEC: ${{ github.event.inputs.voice_duration_sec || github.event.client_payload.voice_duration_sec }}
+          BACKGROUND_MUSIC_URL: ${{ github.event.inputs.background_music_url || github.event.client_payload.background_music_url }}
+          BACKGROUND_MUSIC_VOLUME: ${{ github.event.inputs.background_music_volume || github.event.client_payload.background_music_volume }}
         run: |
           node - <<'NODE'
           const fs = require('node:fs');
@@ -93,6 +95,8 @@ jobs:
           const imagePaths = JSON.parse(process.env.IMAGE_PATHS_JSON || '[]');
           const subtitleEvents = JSON.parse(process.env.SUBTITLE_EVENTS_JSON || '[]');
           const voiceDurationSec = Math.max(1, Number(process.env.VOICE_DURATION_SEC || 1));
+          const bgMusicUrlRaw = String(process.env.BACKGROUND_MUSIC_URL || '').trim();
+          const bgMusicVolumeRaw = Number(process.env.BACKGROUND_MUSIC_VOLUME || 0.1);
 
           if (!audioPath || !imagePaths.length) {
             throw new Error('audio_path and image_paths_json are required');
@@ -119,6 +123,24 @@ jobs:
               localImages.push(localPath);
             }
 
+            let backgroundMusicUrl = '';
+            if (bgMusicUrlRaw) {
+              try {
+                const res = await fetch(bgMusicUrlRaw, {redirect: 'follow'});
+                if (!res.ok) throw new Error(`background download failed: ${res.status}`);
+                const buf = Buffer.from(await res.arrayBuffer());
+                if (buf.length > 0) {
+                  const localBgPath = 'public/render-assets/background.mp3';
+                  fs.mkdirSync(path.dirname(localBgPath), {recursive: true});
+                  fs.writeFileSync(localBgPath, buf);
+                  backgroundMusicUrl = 'render-assets/background.mp3';
+                  console.log(`background_music_download=ok bytes=${buf.length}`);
+                }
+              } catch (error) {
+                console.warn(`background_music_download=skip reason=${error instanceof Error ? error.message : String(error)}`);
+              }
+            }
+
             const normalizedSubtitles = subtitleEvents
               .map((event) => ({
                 text: String(event.text || '').replace(/\s+/g, ' ').trim().toUpperCase(),
@@ -135,6 +157,8 @@ jobs:
                   imagePaths: localImages.map((x) => x.replace(/^public/, '')),
                   subtitleEvents: normalizedSubtitles,
                   voiceDurationSec,
+                  backgroundMusicUrl,
+                  backgroundMusicVolume: Number.isFinite(bgMusicVolumeRaw) ? Math.max(0, Math.min(0.25, bgMusicVolumeRaw)) : 0.1,
                 },
                 null,
                 2,
