@@ -20,34 +20,6 @@ export type RenderProps = {
   voiceDurationSec: number;
 };
 
-const groupWindow = (events: SubtitleEvent[], idx: number) => {
-  const words: string[] = [];
-  for (let i = idx; i >= 0 && words.length < 6; i -= 1) {
-    const gap = i < idx ? events[i + 1].start - events[i].end : 0;
-    if (gap > 0.45) break;
-    words.unshift(events[i].text.toUpperCase());
-  }
-  const text = words.join(' ').trim();
-  if (text.length <= 24) return text;
-  const tokens = text.split(' ');
-  const line1: string[] = [];
-  const line2: string[] = [];
-  for (const token of tokens) {
-    const current = line2.length ? line2 : line1;
-    const projected = `${current.join(' ')} ${token}`.trim();
-    if (current === line1 && projected.length <= 24) {
-      line1.push(token);
-      continue;
-    }
-    if (line2.length === 0 || `${line2.join(' ')} ${token}`.trim().length <= 24) {
-      line2.push(token);
-      continue;
-    }
-    break;
-  }
-  return [line1.join(' '), line2.join(' ')].filter(Boolean).join('\n').trim();
-};
-
 export const ShortVideo: React.FC<RenderProps> = ({audioPath, imagePaths, subtitleEvents, voiceDurationSec}) => {
   const frame = useCurrentFrame();
   const {fps, durationInFrames} = useVideoConfig();
@@ -57,26 +29,33 @@ export const ShortVideo: React.FC<RenderProps> = ({audioPath, imagePaths, subtit
   const sceneFrames = Math.max(1, Math.floor(durationInFrames / safeImages.length));
   const nowSec = frame / fps;
 
-  const subtitle = useMemo(() => {
+  const activeWord = useMemo(() => {
     if (!subtitleEvents.length) return {text: '', startFrame: 0};
-    let activeIdx = subtitleEvents.findIndex((event) => nowSec >= event.start && nowSec <= event.end + 0.03);
-    if (activeIdx < 0) {
-      activeIdx = subtitleEvents.findIndex((event) => event.start > nowSec);
-      if (activeIdx > 0) activeIdx -= 1;
-    }
-    if (activeIdx < 0) return {text: '', startFrame: 0};
-    const text = groupWindow(subtitleEvents, activeIdx);
+
+    const idx = subtitleEvents.findIndex((event) => {
+      const start = Math.max(0, Number(event.start || 0));
+      const end = Math.max(start + 0.04, Number(event.end || 0));
+      return nowSec >= start && nowSec <= end + 0.02;
+    });
+
+    if (idx < 0) return {text: '', startFrame: 0};
+    const word = String(subtitleEvents[idx].text || '').trim().toUpperCase();
     return {
-      text,
-      startFrame: Math.floor((subtitleEvents[activeIdx].start || 0) * fps),
+      text: word,
+      startFrame: Math.floor(Math.max(0, Number(subtitleEvents[idx].start || 0)) * fps),
     };
   }, [fps, nowSec, subtitleEvents]);
 
   const subtitlePop = spring({
     fps,
-    frame: Math.max(0, frame - subtitle.startFrame),
-    config: {damping: 220, stiffness: 250, mass: 0.5},
-    durationInFrames: 8,
+    frame: Math.max(0, frame - activeWord.startFrame),
+    config: {damping: 180, stiffness: 260, mass: 0.5},
+    durationInFrames: 7,
+  });
+
+  const subtitleFade = interpolate(frame - activeWord.startFrame, [0, 2, 5], [0, 0.75, 1], {
+    extrapolateLeft: 'clamp',
+    extrapolateRight: 'clamp',
   });
 
   return (
@@ -115,21 +94,22 @@ export const ShortVideo: React.FC<RenderProps> = ({audioPath, imagePaths, subtit
             alignItems: 'center',
             justifyContent: 'center',
             textAlign: 'center',
-            whiteSpace: 'pre-line',
             color: '#fff',
-            fontSize: 84,
+            fontSize: 92,
             fontWeight: 900,
-            lineHeight: 1.1,
-            letterSpacing: 1.2,
+            lineHeight: 1.05,
+            letterSpacing: 1.6,
             textTransform: 'uppercase',
-            WebkitTextStroke: '6px rgba(0,0,0,0.95)',
+            WebkitTextStroke: '6px rgba(0,0,0,0.98)',
+            textShadow: '0 6px 22px rgba(0,0,0,0.65)',
             paintOrder: 'stroke fill',
-            transform: `scale(${0.92 + subtitlePop * 0.08})`,
-            opacity: subtitle.text ? 1 : 0,
+            transform: `scale(${0.9 + subtitlePop * 0.1})`,
+            opacity: activeWord.text ? subtitleFade : 0,
             padding: '8px 16px',
+            backgroundColor: 'transparent',
           }}
         >
-          {subtitle.text}
+          {activeWord.text}
         </div>
       </AbsoluteFill>
     </AbsoluteFill>
