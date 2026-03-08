@@ -32,6 +32,14 @@ on:
         description: JSON subtitle events
         required: true
         type: string
+      background_music_url:
+        description: Optional background music URL
+        required: false
+        type: string
+      background_music_volume:
+        description: Optional background music volume
+        required: false
+        type: string
       output_path:
         description: Output object path
         required: true
