@@ -76,6 +76,15 @@ function deriveScheduleStatus(schedule: Schedule, diagnostics: { errorMessage?: 
   return 'pending' as const;
 }
 
+
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled promise rejection:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught exception:', error);
+});
+
 function configureAxiosProxySupport() {
   const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
   if (!proxyUrl) return;
@@ -98,7 +107,11 @@ async function startServer() {
   
   // Settings & Keys
   app.get('/api/settings', async (req, res) => {
-    res.json(await readJson(PATHS.settings));
+    try {
+      res.json(await readJson(PATHS.settings));
+    } catch (error: any) {
+      res.status(500).json({ error: error?.message || 'Failed to load settings' });
+    }
   });
 
   app.post('/api/settings', async (req, res) => {
@@ -309,7 +322,11 @@ async function startServer() {
   });
 
   app.get('/api/facebook/pages', async (req, res) => {
-    res.json(await readJson(PATHS.facebook.pages));
+    try {
+      res.json(await readJson(PATHS.facebook.pages));
+    } catch (error: any) {
+      res.status(500).json({ error: error?.message || 'Failed to load facebook pages' });
+    }
   });
 
   app.delete('/api/facebook/pages/:id', async (req, res) => {
@@ -353,7 +370,11 @@ async function startServer() {
 
   app.get('/api/schedules/:type', async (req, res) => {
     const type = req.params.type as 'video' | 'post';
-    res.json(await readJson(PATHS.schedules[type]));
+    try {
+      res.json(await readJson(PATHS.schedules[type]));
+    } catch (error: any) {
+      res.status(500).json({ error: error?.message || 'Failed to load schedules' });
+    }
   });
 
   app.post('/api/schedules/:type', async (req, res) => {
@@ -402,16 +423,28 @@ async function startServer() {
 
   // Content
   app.get('/api/content/published-videos', async (req, res) => {
-    res.json(await readJson(PATHS.content.published_videos));
+    try {
+      res.json(await readJson(PATHS.content.published_videos));
+    } catch (error: any) {
+      res.status(500).json({ error: error?.message || 'Failed to load published videos' });
+    }
   });
 
   app.get('/api/content/published-posts', async (req, res) => {
-    res.json(await readJson(PATHS.content.published_posts));
+    try {
+      res.json(await readJson(PATHS.content.published_posts));
+    } catch (error: any) {
+      res.status(500).json({ error: error?.message || 'Failed to load published posts' });
+    }
   });
 
   // Logs
   app.get('/api/logs', async (req, res) => {
-    res.json(await readJson(PATHS.logs));
+    try {
+      res.json(await readJson(PATHS.logs));
+    } catch (error: any) {
+      res.status(500).json({ error: error?.message || 'Failed to load logs' });
+    }
   });
 
   // Manual Run

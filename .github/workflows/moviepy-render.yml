@@ -129,11 +129,11 @@ jobs:
 
           # Build short, mobile-readable viral caption chunks (1-2 lines) from
           # timing events while staying synchronized with voiceover progression.
-          MAX_WORDS = 3
-          MAX_CHARS = 20
-          MAX_GAP = 0.45
-          MIN_DUR = 0.85
-          MAX_DUR = 1.80
+          MAX_WORDS = 5
+          MAX_CHARS = 28
+          MAX_GAP = 0.38
+          MIN_DUR = 0.70
+          MAX_DUR = 1.50
 
           chunked = []
           cur_words = []
@@ -209,7 +209,17 @@ jobs:
 
           W, H = 1080, 1920
           FPS = 30
-          SUBTITLE_Y = int(H * 0.60)
+          SUBTITLE_CENTER_Y = int(H * 0.62)
+          SAFE_MARGIN_X = int(W * 0.10)
+          SAFE_MARGIN_Y = int(H * 0.10)
+          SUBTITLE_BOX_W = W - (SAFE_MARGIN_X * 2)
+          SUBTITLE_ZONE_H = int(H * 0.20)
+          SAFE_BOTTOM_MARGIN = 180
+          SUBTITLE_ZONE_TOP = max(
+            SAFE_MARGIN_Y,
+            min(H - SAFE_BOTTOM_MARGIN - SUBTITLE_ZONE_H, int(SUBTITLE_CENTER_Y - (SUBTITLE_ZONE_H / 2)))
+          )
+          POP_ANIM_SEC = 0.12
 
           with open('scene_count.txt', 'r', encoding='utf-8') as f:
             scene_count = int(f.read().strip())
@@ -244,20 +254,39 @@ jobs:
           video = ImageSequenceClip(prepared, durations=[scene_duration] * len(prepared)).with_audio(audio).with_duration(duration)
 
           def subtitle_generator(txt: str):
-            clean = (txt or '').strip()
+            clean = (txt or '').strip().upper()
             if not clean:
               clean = ' '
-            return TextClip(
-              text=clean,
-              font_size=84,
-              color='white',
-              stroke_color='black',
-              stroke_width=7,
-              method='caption',
-              size=(760, None)
+
+            max_text_h = SUBTITLE_ZONE_H - 28
+            text = None
+            for font_size in (108, 100, 92, 84):
+              candidate = TextClip(
+                text=clean,
+                font_size=font_size,
+                color='white',
+                stroke_color='black',
+                stroke_width=5,
+                method='caption',
+                text_align='center',
+                size=(SUBTITLE_BOX_W, None),
+                interline=10,
+                margin=(0, 20)
+              )
+              text = candidate
+              if int(getattr(candidate, 'h', max_text_h)) <= max_text_h:
+                break
+
+            line = CompositeVideoClip(
+              [text.with_position(('center', 'center'))],
+              size=(SUBTITLE_BOX_W, SUBTITLE_ZONE_H)
             )
 
-          subtitles = SubtitlesClip('subtitles.srt', make_textclip=subtitle_generator).with_position(('center', SUBTITLE_Y))
+            return line.resized(
+              lambda t: 1.0 if t >= POP_ANIM_SEC else 0.92 + (0.08 * (t / POP_ANIM_SEC))
+            )
+
+          subtitles = SubtitlesClip('subtitles.srt', make_textclip=subtitle_generator).with_position(('center', SUBTITLE_ZONE_TOP))
           final = CompositeVideoClip([video, subtitles.with_duration(duration)], size=(W, H)).with_audio(audio)
 
           final.write_videofile(
