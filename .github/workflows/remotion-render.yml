@@ -136,7 +136,7 @@ jobs:
       - name: Render MP4 with Remotion
         run: |
           DURATION_FRAMES=$(node -e "const p=require('./render-input.json'); console.log(Math.max(30, Math.ceil((Number(p.voiceDurationSec||1)+0.2)*30)));")
-          npx remotion render remotion/index.ts ShortVideo render.mp4 --props="$(cat render-input.json)" --codec=h264 --pixel-format=yuv420p --concurrency=2 --frames=0-$((DURATION_FRAMES-1))
+          npx remotion render remotion/index.ts ShortVideo render.mp4 --props="$(cat render-input.json)" --codec=h264 --pixel-format=yuv420p --concurrency=2 --frames=0-$((DURATION_FRAMES-1)) --public-dir=public
 
       - name: Validate output exists
         run: test -s render.mp4
