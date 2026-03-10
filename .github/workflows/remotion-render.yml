@@ -158,7 +158,7 @@ jobs:
                   subtitleEvents: normalizedSubtitles,
                   voiceDurationSec,
                   backgroundMusicUrl,
-                  backgroundMusicVolume: Number.isFinite(bgMusicVolumeRaw) ? Math.max(0, Math.min(0.25, bgMusicVolumeRaw)) : 0.1,
+                  backgroundMusicVolume: Number.isFinite(bgMusicVolumeRaw) ? Math.max(0, Math.min(0.3, bgMusicVolumeRaw)) : 0.14,
                 },
                 null,
                 2,
@@ -174,6 +174,7 @@ jobs:
         run: |
           DURATION_FRAMES=$(node -e "const p=require('./render-input.json'); console.log(Math.max(30, Math.ceil((Number(p.voiceDurationSec||1)+0.2)*30)));")
           npx remotion render remotion/index.ts ShortVideo render.mp4 --props="$(cat render-input.json)" --codec=h264 --pixel-format=yuv420p --concurrency=2 --frames=0-$((DURATION_FRAMES-1)) --public-dir=public
+          node -e "const p=require('./render-input.json'); console.log('bgm_props', {backgroundMusicUrl: p.backgroundMusicUrl || '', backgroundMusicVolume: p.backgroundMusicVolume ?? null, voiceDurationSec: p.voiceDurationSec || null});"
 
       - name: Re-encode MP4 for Facebook compatibility
         run: |

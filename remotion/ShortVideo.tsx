@@ -4,6 +4,7 @@ import {
   AbsoluteFill,
   Audio,
   Img,
+  Loop,
   Sequence,
   staticFile,
   interpolate,
@@ -85,7 +86,7 @@ export const ShortVideo: React.FC<RenderProps> = ({
         );
       })}
 
-      {backgroundMusicUrl ? <Audio src={resolveAsset(backgroundMusicUrl)} volume={backgroundMusicVolume} /> : null}
+      {backgroundMusicUrl ? (<Loop durationInFrames={durationInFrames}><Audio src={resolveAsset(backgroundMusicUrl)} volume={backgroundMusicVolume} /></Loop>) : null}
       {audioPath ? <Audio src={resolveAsset(audioPath)} volume={1} /> : null}
 
       <AbsoluteFill
