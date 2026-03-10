@@ -1,6 +1,7 @@
 import fs from 'fs-extra';
 import path from 'path';
 import axios from 'axios';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import crypto from 'crypto';
 
 const DB_ROOT = path.join(process.cwd(), 'database');
@@ -39,8 +40,17 @@ function getSupabaseConfigOrThrow() {
   return { url, key };
 }
 
+
+function getSupabaseAgent() {
+  const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+  if (!proxyUrl) return undefined;
+  return new HttpsProxyAgent(proxyUrl);
+}
+
 function getSupabaseRestClient() {
   const { url, key } = getSupabaseConfigOrThrow();
+  const httpsAgent = getSupabaseAgent();
+
   return axios.create({
     baseURL: `${url}/rest/v1`,
     headers: {
@@ -49,6 +59,8 @@ function getSupabaseRestClient() {
       'Content-Type': 'application/json',
     },
     timeout: 30_000,
+    httpsAgent,
+    proxy: false,
   });
 }
 

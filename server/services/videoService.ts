@@ -18,6 +18,12 @@ type GeneratedScript = {
   hashtags: string;
 };
 
+type BackgroundTrack = {
+  title: string;
+  url: string;
+  volume: number;
+};
+
 type VoiceTimingWord = { word: string; start: number; end: number };
 type VoiceoverMeta = {
   voiceId: string;
@@ -27,11 +33,64 @@ type VoiceoverMeta = {
 };
 
 const UNREAL_VOICES = ['Oliver', 'Noah', 'Ethan', 'Daniel'];
+const BACKGROUND_TRACKS: BackgroundTrack[] = [
+  { title: 'Suspense Surge', url: 'https://incompetech.com/music/royalty-free/mp3-royaltyfree/Volatile%20Reaction.mp3', volume: 0.16 },
+  { title: 'Dark Pursuit', url: 'https://incompetech.com/music/royalty-free/mp3-royaltyfree/Long%20Note%20One.mp3', volume: 0.15 },
+  { title: 'Threat Signal', url: 'https://incompetech.com/music/royalty-free/mp3-royaltyfree/Classic%20Horror%202.mp3', volume: 0.16 },
+  { title: 'Risk Countdown', url: 'https://incompetech.com/music/royalty-free/mp3-royaltyfree/Ghostpocalypse%20-%208%20Epilog.mp3', volume: 0.15 },
+  { title: 'High-Stakes Alert', url: 'https://incompetech.com/music/royalty-free/mp3-royaltyfree/Ouroboros.mp3', volume: 0.16 },
+];
+let lastBackgroundTrackUrl: string | null = null;
 const voiceMetaByJob = new Map<string, VoiceoverMeta>();
+
+const PRE_CTA_VICTIM_SUPPORT_MESSAGE =
+  'If you sent crypto to scammers, check the link in our bio or comments to report the scam and submit your case so investigators can help recover your lost crypto.';
+
+
+const TEXT_FREE_IMAGE_GUARDRAILS =
+  'Show only the real-world visual scene from narration. Focus on environment, people/objects, lighting, mood, composition, and cinematic details. Strictly no text, no words, no letters, no numbers, no captions, no labels, no subtitles, no logos, no UI/interface text, no title overlays, no watermark-like marks, no signage with readable writing. Do not render phones, computer monitors, dashboards, charts, graphs, tickers, counters, storefront signs, billboards, street signage, brand badges, patches, emblems, badges, vehicle logos, or any screen-like overlays that could introduce text. Use plain textless surfaces and neutral, unbranded backgrounds only.';
+
+export function buildTextFreeScenePrompt(sceneText: string, topic: string, extraVisualPrompt?: string) {
+  const scene = toVisualActionText(sceneText);
+  const focusedTopic = sanitizeTextArtifacts(topic, 80).toLowerCase() || 'crypto fraud awareness';
+  const visualOnly = sanitizeTextArtifacts(String(extraVisualPrompt || '').replace(/\s+/g, ' '), 180).toLowerCase();
+  const detail = visualOnly ? `Optional visual mood hints: ${visualOnly}.` : '';
+  return `Create a text-free cinematic still image. Main visual action: ${scene}. Context: ${focusedTopic}. Use an unbranded indoor environment with plain walls and generic objects only. ${detail} ${TEXT_FREE_IMAGE_GUARDRAILS} Documentary realism, vertical 9:16 frame, high detail, dramatic but natural lighting.`
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
 
 function stripToSingleLine(value: string, maxLen: number) {
   const compact = String(value || '').replace(/\s+/g, ' ').trim();
   return compact.slice(0, maxLen).trim();
+}
+
+
+function sanitizeTextArtifacts(value: string, maxLen: number) {
+  return stripToSingleLine(value, maxLen)
+    .replace(/["“][^"”]{1,80}["”]/g, ' ')
+    .replace(/[#@][\w-]+/g, ' ')
+    .replace(/\b[A-Z0-9]{2,}\b/g, ' ')
+    .replace(/\b[A-Z][a-z]{2,}\b/g, ' ')
+    .replace(/[$€£¥]\s*\d+(?:[.,]\d+)?\b/g, ' ')
+    .replace(/\b\d+(?:[.,]\d+)?%?\b/g, ' ')
+    .replace(/\b(airdrop|promo code|coupon|headline|title|caption|label|logo text|watermark text|subtitle text|interface text|chart|graph|axis|counter|ticker|headline bar|lower third|banner|billboard|signage|screen text|phone text|ford|tesla|xrp|bitcoin|ethereum|coinbase|binance|metamask|youtube|facebook|instagram|tiktok|whatsapp)\b/gi, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+
+
+
+function toVisualActionText(sceneText: string) {
+  const cleaned = sanitizeTextArtifacts(sceneText, 220).toLowerCase();
+  const action = cleaned
+    .replace(/[^a-z\s]/g, ' ')
+    .replace(/(and|with|from|into|onto|about|this|that|these|those|your|their|our|for|the|a|an)/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  return action || 'person reviewing suspicious crypto activity with concern';
 }
 
 function looksLikeCta(text: string) {
@@ -40,9 +99,15 @@ function looksLikeCta(text: string) {
 }
 
 function sceneImagePromptFromNarration(sceneText: string, topic: string) {
-  const scene = stripToSingleLine(sceneText, 260);
-  const focusedTopic = stripToSingleLine(topic, 120);
-  return `${scene}. Visualize this exact moment from the topic: ${focusedTopic}. Documentary realism, cinematic vertical 9:16, high detail, natural lighting, no text, no letters, no logos, no watermark.`;
+  return buildTextFreeScenePrompt(sceneText, topic);
+}
+
+function preCtaVictimSupportImagePrompt(sceneText: string) {
+  return buildTextFreeScenePrompt(
+    sceneText,
+    'Crypto scam victim support',
+    'Trustworthy crypto investigation office, analyst team reviewing blockchain wallet traces on secure dashboards, victim support specialist guiding a case intake'
+  );
 }
 
 function extractJsonObject(raw: string) {
@@ -103,9 +168,7 @@ function normalizeScriptPayload(payload: any, topic: string): GeneratedScript {
         }))
     : [];
 
-  const preCtaText =
-    stripToSingleLine(String(payload?.preCtaScene?.text || ''), 260) ||
-    'If you already sent crypto to scammers, check the link in our bio or comments to report the scam and submit your case for professional recovery support.';
+  const preCtaText = PRE_CTA_VICTIM_SUPPORT_MESSAGE;
 
   const cta =
     stripToSingleLine(String(payload?.cta || ''), 200) ||
@@ -118,9 +181,7 @@ function normalizeScriptPayload(payload: any, topic: string): GeneratedScript {
     scenes,
     preCtaScene: {
       text: preCtaText,
-      imagePrompt:
-        stripToSingleLine(String(payload?.preCtaScene?.imagePrompt || ''), 260) ||
-        sceneImagePromptFromNarration(preCtaText, topic),
+      imagePrompt: preCtaVictimSupportImagePrompt(preCtaText),
     },
     cta,
     caption: stripToSingleLine(String(payload?.caption || ''), 240),
@@ -149,10 +210,10 @@ Return JSON exactly as:
 
 Rules:
 - Use one topic only: do not introduce other incidents, coins, scams, or side stories.
-- Hook + scenes + preCtaScene + cta must all stay on this exact topic.
+- Hook + scenes + cta must all stay on this exact topic.
 - scenes: 6-8 entries, factual, dynamic, web-style informational details (names, amounts, timeline, mechanics, impact) tied to topic; avoid generic filler language.
 - scenes must contain no CTA language (no follow/like/share/comment/link prompts).
-- preCtaScene: one dedicated, professional victim-support scene that appears immediately before final CTA and says victims can use link in bio/comments to report scam and submit case for recovery investigation.
+- preCtaScene: one dedicated victim-assistance scene that appears immediately before final CTA, is NOT about the main topic, and tells viewers who sent crypto to scammers to use the link in bio/comments to report scam + submit case so investigators can help recover lost crypto.
 - cta: exactly one final CTA line only, natural and professional, asking viewers to like, share, and follow, tied to this topic.
 - imagePrompt must visually describe the same narration moment as its scene text, cinematic vertical 9:16, no text/watermarks/logos.
 - hashtags: exactly 5.`
@@ -171,7 +232,7 @@ export async function generateFacebookComment(title: string, caption: string, to
           {
             role: 'system',
             content:
-              'Write one professional Facebook comment in 45-85 words. Keep it engaging and tied tightly to the single topic, title, and caption. No hashtags, no markdown, no generic filler. Include a short engagement line. Do not mention victim reporting unless a link is provided by the caller.',
+              'Write one professional Facebook page admin comment in 24-36 words. It must be concise, engaging, and attention-grabbing, with one clear topic-focused hook and a short like/share/follow prompt. Keep it authoritative and trustworthy. No hashtags, no markdown, no pricing/fee wording, and no victim-reporting language unless a link is provided.',
           },
           {
             role: 'user',
@@ -187,11 +248,36 @@ Caption: ${caption}`,
       }
     );
 
-    return stripToSingleLine(String(response.data.choices?.[0]?.message?.content || ''), 520);
+    const raw = stripToSingleLine(String(response.data.choices?.[0]?.message?.content || ''), 240);
+    const cleaned = raw
+      .replace(/\bno upfront fees?\b/gi, '')
+      .replace(/\bwithout upfront fees?\b/gi, '')
+      .replace(/\b(if you sent crypto to scammers|report (the )?crypto scam|submit your case|recovery options|link in (our )?(bio|comments?))\b/gi, '')
+      .replace(/\b(like\s*(this\s*video)?\s*,?\s*share(\s*it)?\s*(with others)?\s*(and|&)\s*follow(\s*our page)?)\b/gi, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+
+    const withTopic = cleaned || `Page update: ${topic} exposes a scam pattern you need to spot fast.`;
+    const engagementNudges = 'Like, share, and follow for trusted scam alerts.';
+    const merged = `${withTopic} ${engagementNudges}`.replace(/\s{2,}/g, ' ').trim();
+    return stripToSingleLine(merged, 170);
   });
 
   if (!appendUrl) return base;
-  return `${base} If you already sent crypto to scammers, use this link to report the scam and submit your case for recovery review: ${appendUrl}`;
+  return `${base} Crypto scam victims: report and start recovery here: ${appendUrl}`;
+}
+
+function chooseRandomBackgroundTrack() {
+  if (BACKGROUND_TRACKS.length <= 1) {
+    const only = BACKGROUND_TRACKS[0];
+    lastBackgroundTrackUrl = only?.url || null;
+    return only;
+  }
+
+  const candidates = BACKGROUND_TRACKS.filter((track) => track.url !== lastBackgroundTrackUrl);
+  const selected = candidates[Math.floor(Math.random() * candidates.length)] || BACKGROUND_TRACKS[0];
+  lastBackgroundTrackUrl = selected.url;
+  return selected;
 }
 
 function normalizeWordTimings(raw: any): VoiceTimingWord[] {
@@ -328,6 +414,16 @@ async function generateImageWithPollinations(prompt: string, jobId: string, scen
   return filePath;
 }
 
+function buildSafeFallbackPrompt() {
+  return 'Create a text-free cinematic documentary still in an unbranded indoor office. One person reviewing suspicious financial activity with concern. Plain walls, neutral objects, no screens, no signs, no logos, no text, no letters, no numbers, no watermark.';
+}
+
+function isWorkersNsfwError(error: any) {
+  const code = Number(error?.response?.data?.errors?.[0]?.code || 0);
+  const message = String(error?.response?.data?.errors?.[0]?.message || '').toLowerCase();
+  return code === 3030 || message.includes('nsfw');
+}
+
 export async function generateImage(prompt: string, jobId: string, sceneIdx: number) {
   const accountId = await resolveCloudflareAccountId();
   if (!accountId) {
@@ -336,10 +432,12 @@ export async function generateImage(prompt: string, jobId: string, sceneIdx: num
 
   try {
     return await withKeyFailover('workers-ai', async (key) => {
-      const response = await axios.post(
+      const requestImage = async (promptText: string) => axios.post(
         `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/black-forest-labs/flux-1-schnell`,
         {
-          prompt,
+          prompt: promptText,
+          negative_prompt:
+            'text, words, letters, numbers, typography, captions, subtitles, labels, title overlay, interface, logo, watermark, signature, signage with readable writing, brand logo, company emblem, ticker, chart, dashboard, user interface, storefront sign',
           steps: 6,
           width: 1080,
           height: 1920,
@@ -349,6 +447,15 @@ export async function generateImage(prompt: string, jobId: string, sceneIdx: num
           timeout: 60_000,
         }
       );
+
+      let response;
+      try {
+        response = await requestImage(prompt);
+      } catch (error) {
+        if (!isWorkersNsfwError(error)) throw error;
+        console.warn(`[image:${jobId}:${sceneIdx}] workers_nsfw_filter_retry_with_safe_prompt`);
+        response = await requestImage(buildSafeFallbackPrompt());
+      }
 
       const dir = path.join(process.cwd(), 'database/assets/images', jobId);
       await fs.ensureDir(dir);
@@ -363,13 +470,11 @@ export async function generateImage(prompt: string, jobId: string, sceneIdx: num
       return filePath;
     });
   } catch (error) {
-    console.warn(`[image:${jobId}:${sceneIdx}] Workers AI failed; falling back to Pollinations:`, error);
-    try {
-      return await generateImageWithPollinations(prompt, jobId, sceneIdx);
-    } catch (fallbackError) {
-      console.warn(`[image:${jobId}:${sceneIdx}] Pollinations failed; using local placeholder image:`, fallbackError);
-      return generateLocalPlaceholderImage(jobId, sceneIdx);
-    }
+    console.error(
+      `[image:${jobId}:${sceneIdx}] Workers AI failed in strict text-free mode; non-Workers fallback disabled to prevent text artifacts.`,
+      error
+    );
+    throw error;
   }
 }
 
@@ -392,13 +497,17 @@ export async function assembleVideo(jobId: string, audioPath: string, imagePaths
   }
 
   const subtitleEvents = buildSubtitleEventsFromWords(meta.words);
+  const backgroundTrack = chooseRandomBackgroundTrack();
   console.info(`[render:${jobId}] subtitle_format=srt subtitle_events=${subtitleEvents.length}`);
+  console.info(`[render:${jobId}] background_track_selected title=${backgroundTrack.title} volume=${backgroundTrack.volume}`);
 
   const remote = await renderVideoViaGitHubActions({
     jobId,
     audioPath,
     imagePaths,
     subtitleEvents,
+    backgroundMusicUrl: backgroundTrack.url,
+    backgroundMusicVolume: backgroundTrack.volume,
     voiceoverMeta: {
       voiceId: meta.voiceId,
       timingSource: meta.timingSource,

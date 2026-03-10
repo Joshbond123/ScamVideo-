@@ -7,6 +7,7 @@ import {
   generateVoiceover,
   generateImage,
   assembleVideo,
+  buildTextFreeScenePrompt,
   uploadToCatbox,
   cleanupJobAssets,
   generatePostImageWithTitleOverlay,
@@ -112,6 +113,44 @@ async function touchHeartbeat(schedule: Schedule, stage?: string) {
     lastHeartbeatAt: new Date().toISOString(),
     ...(stage ? { currentStage: stage } : {}),
   });
+}
+
+
+function isTransientError(error: any) {
+  const status = Number(error?.response?.status || error?.status || 0);
+  const code = String(error?.code || '');
+  const message = String(error?.message || '').toLowerCase();
+  if ([408, 425, 429, 500, 502, 503, 504].includes(status)) return true;
+  if (['ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENETUNREACH', 'ERR_NETWORK'].includes(code)) return true;
+  return message.includes('timeout') || message.includes('temporarily unavailable') || message.includes('too many requests') || message.includes('bad gateway');
+}
+
+async function withTransientRetry<T>(
+  schedule: Schedule,
+  stage: string,
+  label: string,
+  fn: () => Promise<T>,
+  maxAttempts = 3,
+): Promise<T> {
+  let lastError: any;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (error: any) {
+      lastError = error;
+      if (!isTransientError(error) || attempt >= maxAttempts) throw error;
+      const backoffMs = Math.min(8_000, attempt * 1_500);
+      await logEvent(
+        schedule.type,
+        'info',
+        `stage_retry id=${schedule.id} stage=${stage} label=${label} attempt=${attempt}/${maxAttempts} backoffMs=${backoffMs} reason=${error?.message || error}`,
+        schedule.niche,
+      );
+      await new Promise((resolve) => setTimeout(resolve, backoffMs));
+      await touchHeartbeat(schedule, stage);
+    }
+  }
+  throw lastError;
 }
 
 async function withStage<T>(schedule: Schedule, stage: string, fn: () => Promise<T>): Promise<T> {
@@ -497,15 +536,14 @@ export async function runJob(schedule: Schedule) {
 async function runVideoPipeline(schedule: Schedule, topic: string) {
   const jobId = schedule.id;
   try {
-    const scriptData = await withStage(schedule, 'video_script_generation', async () => generateScript(schedule.niche, topic));
+    const scriptData = await withStage(schedule, 'video_script_generation', async () =>
+      withTransientRetry(schedule, 'video_script_generation', 'generateScript', () => generateScript(schedule.niche, topic), 3)
+    );
     await updateSchedule(schedule.id, schedule.type, { generatedTitle: scriptData?.title || '' });
 
     if (!Array.isArray(scriptData?.scenes) || scriptData.scenes.length === 0) {
       throw new Error('Generated video script has no scenes');
     }
-
-    const stitchedScript = [scriptData.hook, scriptData.script, scriptData.preCtaScene?.text, scriptData.cta].filter(Boolean).join(' ');
-    const audioPath = await withStage(schedule, 'video_voiceover_generation', async () => generateVoiceover(stitchedScript, jobId));
 
     const scenePlan = [
       ...scriptData.scenes,
@@ -513,38 +551,62 @@ async function runVideoPipeline(schedule: Schedule, topic: string) {
       { text: scriptData.cta, imagePrompt: '' },
     ].filter(Boolean);
 
+    const uniqueNarration = scenePlan
+      .map((s: any) => String(s?.text || '').replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
+      .filter((line: string, idx: number, arr: string[]) => idx === 0 || line.toLowerCase() !== arr[idx - 1].toLowerCase());
+    const stitchedScript = uniqueNarration.join(' ');
+
+    const audioPath = await withStage(schedule, 'video_voiceover_generation', async () =>
+      withTransientRetry(schedule, 'video_voiceover_generation', 'generateVoiceover', () => generateVoiceover(stitchedScript, jobId), 3)
+    );
+
     const imagePaths: string[] = [];
     await withStage(schedule, 'video_scene_image_generation', async () => {
       for (let i = 0; i < scenePlan.length; i++) {
         const narration = String(scenePlan[i]?.text || '').replace(/\s+/g, ' ').trim();
-        const promptFromNarration = `${narration}. Visualize this exact narration moment from topic "${topic}". Cinematic documentary realism, vertical 9:16, no text, no letters, no logos, no watermark.`;
-        const prompt = `${promptFromNarration} ${String(scenePlan[i]?.imagePrompt || '').trim()}`.trim();
-        const imgPath = await generateImage(prompt, jobId, i);
+        const prompt = buildTextFreeScenePrompt(narration, topic);
+        const imgPath = await withTransientRetry(schedule, 'video_scene_image_generation', `generateImage:${i}`, () => generateImage(prompt, jobId, i), 3);
         imagePaths.push(imgPath);
       }
     });
 
     const videoPath = await withStage(schedule, 'video_render_remotion', async () =>
-      assembleVideo(
-        jobId,
-        audioPath,
-        imagePaths,
-        scenePlan.map((s: any) => String(s?.text || '').trim()).filter(Boolean)
+      withTransientRetry(
+        schedule,
+        'video_render_remotion',
+        'assembleVideo',
+        () => assembleVideo(jobId, audioPath, imagePaths, scenePlan.map((s: any) => String(s?.text || '').trim()).filter(Boolean)),
+        2
       )
     );
 
-    const videoUrl = await withStage(schedule, 'video_host_catbox', async () => uploadToCatbox(videoPath));
+    const videoUrl = await withStage(schedule, 'video_host_catbox', async () =>
+      withTransientRetry(schedule, 'video_host_catbox', 'uploadToCatbox', () => uploadToCatbox(videoPath), 4)
+    );
     await logEvent(schedule.type, 'info', `catbox_video_uploaded id=${schedule.id} url=${videoUrl}`, schedule.niche);
 
     await withStage(schedule, 'video_publish_facebook', async () => {
       const description = `${scriptData.caption}\n\n${scriptData.hashtags}`;
-      const fbResult = await postVideoToFacebook(schedule.pageId, videoUrl, description);
+      const fbResult = await withTransientRetry(
+        schedule,
+        'video_publish_facebook',
+        'postVideoToFacebook',
+        () => postVideoToFacebook(schedule.pageId, videoUrl, description),
+        3
+      );
       const publishTargetId = String((fbResult as any)?.post_id || (fbResult as any)?.id || '');
       if (!publishTargetId) {
         throw new Error(`Facebook upload did not return post id: ${JSON.stringify(fbResult || {})}`);
       }
 
-      const verified = await verifyFacebookObjectPublished(schedule.pageId, publishTargetId);
+      const verified = await withTransientRetry(
+        schedule,
+        'video_publish_facebook',
+        'verifyFacebookObjectPublished',
+        () => verifyFacebookObjectPublished(schedule.pageId, publishTargetId),
+        3
+      );
       await logEvent(schedule.type, 'info', `facebook_publish_verified id=${schedule.id} object=${verified.id} url=${verified.url}`, schedule.niche);
 
       const settings = await readJson<any>(PATHS.settings);

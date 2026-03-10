@@ -11,6 +11,8 @@ type RenderRequest = {
   audioPath: string;
   imagePaths: string[];
   subtitleEvents: SubtitleEvent[];
+  backgroundMusicUrl?: string;
+  backgroundMusicVolume?: number;
   voiceoverMeta: { voiceId: string; timingSource: string; durationSec: number };
 };
 
@@ -146,6 +148,26 @@ function buildDispatchCandidates(configuredWorkflow: string, workflows: Workflow
   return ordered;
 }
 
+function stripUnexpectedWorkflowInputs(inputs: Record<string, string>, message: string): Record<string, string> | null {
+  const match = message.match(/Unexpected inputs provided:\s*\[(.*?)\]/i);
+  if (!match) return null;
+  const names = match[1]
+    .split(',')
+    .map((token) => token.trim().replace(/^"|"$/g, '').replace(/^'|'$/g, ''))
+    .filter(Boolean);
+  if (!names.length) return null;
+
+  const trimmed: Record<string, string> = { ...inputs };
+  let removed = false;
+  for (const key of names) {
+    if (key in trimmed) {
+      delete trimmed[key];
+      removed = true;
+    }
+  }
+  return removed ? trimmed : null;
+}
+
 async function triggerWorkflow(cfg: RenderConfig, jobId: string, inputs: Record<string, string>): Promise<DispatchAttempt> {
   const { token, repo, workflow, ref } = cfg;
   const client = ghClient(token);
@@ -166,55 +188,85 @@ async function triggerWorkflow(cfg: RenderConfig, jobId: string, inputs: Record<
   );
 
   let dispatchError: any = null;
+  let fallbackToRepositoryDispatch = false;
   for (const selectedWorkflow of candidates) {
     if (selectedWorkflow.state !== 'active') continue;
-    try {
-      await ghRequestWithRetry(
-        'dispatch_workflow',
-        () =>
-          client.post(`/repos/${repo}/actions/workflows/${selectedWorkflow.id}/dispatches`, {
-            ref,
-            inputs: {
-              ...inputs,
-              job_id: jobId,
-            },
-          }),
-        jobId
-      );
-      console.info(`[render:${jobId}] github_dispatch_sent mode=workflow_dispatch workflow_id=${selectedWorkflow.id} workflow_path=${selectedWorkflow.path} ref=${ref}`);
-      return {
-        mode: 'workflow_dispatch',
-        workflowId: selectedWorkflow.id,
-        workflowName: selectedWorkflow.path,
-        ref,
-      };
-    } catch (error: any) {
-      dispatchError = error;
-      const status = Number(error?.response?.status || 0);
-      const message = String(error?.response?.data?.message || error?.message || '');
-      console.warn(`[render:${jobId}] workflow_dispatch_failed workflow_id=${selectedWorkflow.id} workflow_path=${selectedWorkflow.path} status=${status || 'n/a'} message=${message}`);
-      if (status === 422 && message.toLowerCase().includes('workflow_dispatch')) {
-        continue;
+    let workflowInputs: Record<string, string> = {
+      ...inputs,
+      job_id: jobId,
+    };
+
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await ghRequestWithRetry(
+          'dispatch_workflow',
+          () =>
+            client.post(`/repos/${repo}/actions/workflows/${selectedWorkflow.id}/dispatches`, {
+              ref,
+              inputs: workflowInputs,
+            }),
+          jobId
+        );
+        console.info(`[render:${jobId}] github_dispatch_sent mode=workflow_dispatch workflow_id=${selectedWorkflow.id} workflow_path=${selectedWorkflow.path} ref=${ref}`);
+        return {
+          mode: 'workflow_dispatch',
+          workflowId: selectedWorkflow.id,
+          workflowName: selectedWorkflow.path,
+          ref,
+        };
+      } catch (error: any) {
+        dispatchError = error;
+        const status = Number(error?.response?.status || 0);
+        const message = String(error?.response?.data?.message || error?.message || '');
+        console.warn(`[render:${jobId}] workflow_dispatch_failed workflow_id=${selectedWorkflow.id} workflow_path=${selectedWorkflow.path} status=${status || 'n/a'} message=${message}`);
+
+        const trimmedInputs = status === 422 ? stripUnexpectedWorkflowInputs(workflowInputs, message) : null;
+        if (trimmedInputs && attempt === 1) {
+          const removedInputs = Object.keys(workflowInputs).filter((key) => !(key in trimmedInputs));
+          if (removedInputs.some((key) => key === 'background_music_url' || key === 'background_music_volume')) {
+            fallbackToRepositoryDispatch = true;
+            console.warn(
+              `[render:${jobId}] workflow_dispatch_missing_background_music_inputs workflow_id=${selectedWorkflow.id} removed=${removedInputs.join(',')} mode=repository_dispatch`
+            );
+            break;
+          }
+
+          workflowInputs = trimmedInputs;
+          console.info(`[render:${jobId}] workflow_dispatch_retry_without_unsupported_inputs workflow_id=${selectedWorkflow.id} inputs=${Object.keys(workflowInputs).join(',')}`);
+          continue;
+        }
+
+        if (status === 422 && message.toLowerCase().includes('workflow_dispatch')) {
+          break;
+        }
+        if (status === 404) break;
+        throw error;
       }
-      if (status === 404) continue;
-      throw error;
     }
+
+    if (fallbackToRepositoryDispatch) break;
   }
 
   try {
     const status = dispatchError?.response?.status;
     const message = String(dispatchError?.response?.data?.message || dispatchError?.message || '');
     console.warn(`[render:${jobId}] GitHub workflow dispatch unavailable (status=${status || 'n/a'} message=${message}); trying repository_dispatch fallback`);
+
+    const repositoryDispatchPayload: Record<string, string> = {
+      ...inputs,
+      job_id: jobId,
+    };
+    const payloadKeys = Object.keys(repositoryDispatchPayload);
+    if (payloadKeys.length > 10 && 'background_music_volume' in repositoryDispatchPayload) {
+      delete repositoryDispatchPayload.background_music_volume;
+    }
+
     await ghRequestWithRetry(
       'repository_dispatch',
       () =>
         client.post(`/repos/${repo}/dispatches`, {
           event_type: 'render_video',
-          client_payload: {
-            ...inputs,
-            job_id: jobId,
-            ref,
-          },
+          client_payload: repositoryDispatchPayload,
         }),
       jobId
     );
@@ -224,8 +276,11 @@ async function triggerWorkflow(cfg: RenderConfig, jobId: string, inputs: Record<
       workflowName: 'repository_dispatch:render_video',
       ref,
     };
-  } catch {
-    throw dispatchError || new Error(`Failed to dispatch GitHub render workflow for ${jobId}`);
+  } catch (fallbackError: any) {
+    const fallbackStatus = Number(fallbackError?.response?.status || 0);
+    const fallbackMessage = String(fallbackError?.response?.data?.message || fallbackError?.message || '');
+    console.error(`[render:${jobId}] repository_dispatch_failed status=${fallbackStatus || 'n/a'} message=${fallbackMessage}`);
+    throw fallbackError || dispatchError || new Error(`Failed to dispatch GitHub render workflow for ${jobId}`);
   }
 }
 
@@ -328,6 +383,8 @@ export async function renderVideoViaGitHubActions(payload: RenderRequest) {
     audio_path: uploadedAudio,
     image_paths_json: JSON.stringify(uploadedImages),
     subtitle_events_json: JSON.stringify(payload.subtitleEvents || []),
+    background_music_url: String(payload.backgroundMusicUrl || ''),
+    background_music_volume: String(payload.backgroundMusicVolume ?? 0.1),
     output_path: outputPath,
     voice_duration_sec: String(payload.voiceoverMeta?.durationSec || 0),
   };
